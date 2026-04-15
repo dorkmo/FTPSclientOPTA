@@ -1,0 +1,21 @@
+# Compiled object files
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+
+# Arduino build output
+build/
+*.d
+
+# VS Code
+.vscode/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Arduino IDE
+*.ino.bootloader.bin
+*.ino.with_bootloader.bin

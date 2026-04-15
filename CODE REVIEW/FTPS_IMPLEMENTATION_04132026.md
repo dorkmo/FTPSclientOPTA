@@ -1,40 +1,43 @@
-# FTPS Implementation Note — TankAlarm Server
+# FTPS Implementation Note — Arduino Opta FTPS Library
 
 **Date:** April 13, 2026  
-**Scope:** Server-side backup, restore, archive, and FTP-backed history retrieval  
-**Status:** Design note only; not implemented in firmware
+**Scope:** General-purpose FTPS client library design for Arduino Opta  
+**Status:** Design note only; not implemented
 
 ---
 
 ## Executive Summary
 
-The My Cloud PR4100 appears to support FTPS on the NAS side, including both implicit and explicit TLS modes. The current TankAlarm server firmware does **not** support FTPS; it uses plain `EthernetClient` sockets and sends `USER`, `PASS`, `STOR`, and `RETR` over standard FTP.
+This document describes the design of a general-purpose Explicit FTPS client library for Arduino Opta devices. The library targets Mbed-based Ethernet/TLS transport and is intended for validation against a WD My Cloud PR4100 NAS, vsftpd, and FileZilla Server.
 
-An FTPS migration is feasible, but it is **not** a one-line port change. The server sketch needs:
+Building an FTPS library for the Opta requires:
 
 1. A TLS-capable Ethernet client layer for the Opta.
-2. New config fields for FTPS mode and certificate validation.
-3. Refactoring of the low-level FTP control/data connection code.
-4. UI and API changes so the user can configure TLS mode and trust settings.
-5. Regression testing across every place the server currently uses FTP, not just manual backup/restore.
+2. Config types for FTPS mode and certificate validation.
+3. A transport abstraction for FTP control/data connection code.
+4. Trust model implementation (fingerprint pinning and imported PEM certificate trust).
+5. Integration testing across upload and download paths.
 
-This implementation plan now targets **Explicit TLS FTPS only**. It is the best fit for the PR4100 manual, the most standard option, and the closest to the current port-21 passive-FTP flow. Implicit TLS is retained in this document only as comparison/background material, not as part of the current implementation scope.
+### Nomenclature note (April 15, 2026)
+
+Some legacy option-comparison snippets in this document use older names such as `IFtpTransport` and `MbedSecureSocketFtpTransport`. In the current repository scaffold, these map to `IFtpsTransport` and `MbedSecureSocketFtpsTransport`.
+
+This implementation plan targets **Explicit TLS FTPS only**. It is the most standard option and the closest to the port-21 passive-FTP flow. Implicit TLS is retained in this document only as comparison/background material, not as part of the current implementation scope.
 
 ---
 
 ## What FTPS Fixes
 
 - Encrypts FTP credentials on the wire.
-- Encrypts backup and restore payloads on the wire.
+- Encrypts file transfer payloads on the wire.
 - Reduces the risk of passive sniffing on the local network.
-- Keeps the current backup architecture mostly intact if implemented as **Explicit TLS**.
+- Keeps the existing FTP workflow mostly intact if implemented as **Explicit TLS**.
 
 ## What FTPS Does Not Fix
 
-- It does not add HTTPS to the TankAlarm web UI.
-- It does not secure unrelated HTTP traffic elsewhere in the system.
+- It does not add HTTPS or other TLS to non-FTP traffic in the host application.
 - It does not remove the need for certificate management.
-- It does not eliminate logic bugs, partial-backup risk, or power-loss recovery concerns.
+- It does not eliminate application-level bugs or error handling concerns.
 - It does not automatically guarantee man-in-the-middle protection unless certificate validation is enforced correctly.
 
 ---
@@ -45,10 +48,10 @@ This implementation plan now targets **Explicit TLS FTPS only**. It is the best 
 
 Reasons:
 
-- The PR4100 manual explicitly mentions **Explicit TLS**.
-- It aligns with the existing FTP port-21 workflow.
-- It is the most common FTPS mode for NAS products.
-- It minimizes UI disruption for existing users.
+- Most FTPS-capable NAS and server products support **Explicit TLS**.
+- It aligns with the standard FTP port-21 workflow.
+- It is the most common FTPS mode in practice.
+- It minimizes disruption for applications already using plain FTP.
 
 ### Out of current scope: Implicit TLS
 
@@ -57,75 +60,56 @@ Reasons it is not part of this plan:
 - It is older and less common.
 - It typically uses a different port and slightly different connection startup behavior.
 - It adds more config branches and more testing burden.
-- It does not remove the harder parts of this project, such as protected passive data channels, certificate handling, and full archive-path regression testing.
+- It does not remove the harder parts of this project, such as protected passive data channels, certificate handling, and integration testing.
 
 ### Not recommended: automatic fallback from FTPS to plain FTP
 
-If the user selects FTPS, the firmware should fail closed and report a TLS/auth error. Silent fallback to plaintext defeats the point of the change.
+If the application selects FTPS, the library should fail closed and report a TLS/auth error. Silent fallback to plaintext defeats the point of the change.
 
 ---
 
-## Current FTP Surface in Live Code
+## Typical Plain FTP Surface That FTPS Replaces
 
-All current FTP logic is in `TankAlarm-112025-Server-BluesOpta/TankAlarm-112025-Server-BluesOpta.ino`.
+A typical Arduino application using plain FTP has a structure like this:
 
-### Configuration and schema
+### Configuration
 
-- `ServerConfig` currently stores:
-  - `ftpEnabled`
-  - `ftpPassive`
-  - `ftpBackupOnChange`
-  - `ftpRestoreOnBoot`
-  - `ftpPort`
-  - `ftpHost`
-  - `ftpUser`
-  - `ftpPass`
-  - `ftpPath`
-- Defaults are initialized around the existing FTP defaults (`FTP_PORT_DEFAULT` is `21`).
-- Config load/save already obfuscates FTP username/password at rest.
-
-### Settings UI and API
-
-- The embedded Server Settings page contains the FTP host/port/user/password/path inputs and FTP toggles.
-- The UI JavaScript loads FTP settings from the server and posts updates back in JSON.
-- There are multiple server-side settings parsers that accept FTP-related fields.
+- Host, port, username, password, remote path
+- Passive mode toggle
+- Defaults around FTP port `21`
 
 ### Low-level FTP transport
 
-- `FtpSession` currently contains only `EthernetClient ctrl`.
+- An `FtpSession` containing only an `EthernetClient` for the control channel.
 - `ftpSendCommand()` writes raw commands to the control socket.
 - `ftpConnectAndLogin()` does plain TCP connect, reads banner, sends `USER` / `PASS`, then `TYPE I`.
 - `ftpEnterPassive()` uses `PASV` and parses the IPv4 tuple.
 - `ftpStoreBuffer()` and `ftpRetrieveBuffer()` open a plain `EthernetClient` data socket.
 - `ftpQuit()` sends `QUIT` on the plain control socket.
 
-### Current FTP call sites that would be affected by an FTPS migration
+### Call sites affected by FTPS
 
-These all depend on the same low-level FTP helpers and must be regression-tested:
+Any function in the host application that calls the low-level FTP helpers must work with the TLS-upgraded transport. Typical examples include:
 
-- Manual config backup via `performFtpBackupDetailed()`.
-- Manual config restore via `performFtpRestoreDetailed()`.
-- Client config manifest backup/restore helpers.
-- Monthly history archive upload.
-- Archived month download/load for cold-tier history.
-- Archived client export upload.
-- Archive download endpoint that fetches a file from FTP for browser download.
+- File upload operations
+- File download operations
+- Any periodic or event-driven transfer logic
 
-No client firmware or viewer firmware transport changes are required for FTPS itself. The FTP/FTPS surface is currently server-only.
+The FTPS library replaces the low-level FTP transport layer. The host application's call sites should only need to change their session initialization, not the transfer logic itself.
 
 ---
 
-## Required Code Changes
+## Required Library Components
 
-## 1. Add a TLS-capable Ethernet client layer
+## 1. A TLS-capable Ethernet client layer
 
 ### Current state
 
-At the top of the server sketch, the networking includes are limited to `PortentaEthernet.h` and `Ethernet.h`. There is no existing TLS/SSL client abstraction in the codebase.
+A typical Arduino Opta sketch includes only `PortentaEthernet.h` and `Ethernet.h` for networking. There is no existing TLS/SSL client abstraction for FTP use.
 
-### Required change
+### Required implementation
 
-Introduce a TLS-capable client implementation for Opta Ethernet, then hide it behind a small transport wrapper so the rest of the FTP code is not hard-wired to `EthernetClient`.
+Introduce a TLS-capable client implementation for Opta Ethernet, hidden behind a transport abstraction so the FTP protocol code is not hard-wired to `EthernetClient`.
 
 ### Minimum acceptable design
 
@@ -179,12 +163,12 @@ Confirmed findings:
 
 ### Practical conclusion
 
-Yes: the installed Arduino Opta core exposes `NetworkInterface`, `TCPSocket`, and `TLSSocketWrapper` cleanly enough to be used from this sketch.
+Yes: the installed Arduino Opta core exposes `NetworkInterface`, `TCPSocket`, and `TLSSocketWrapper` cleanly enough to be used from a sketch.
 
 What is now confirmed:
 
 - API/header exposure is real, not hypothetical.
-- The current sketch can continue using `Ethernet.begin(...)` and then obtain the underlying Mbed network via `Ethernet.getNetwork()`.
+- A sketch can use `Ethernet.begin(...)` and then obtain the underlying Mbed network via `Ethernet.getNetwork()`.
 - A direct Mbed-socket FTPS transport is a realistic path inside the Arduino sketch environment.
 
 What is **not** fully confirmed by this inspection alone:
@@ -221,7 +205,6 @@ That is why the Mbed secure-socket path is more promising than it first appears:
 - The best first exploration target is therefore a direct Mbed secure-socket path using `Ethernet.getNetwork()` rather than assuming an external TLS library is required.
 - If the direct Mbed wrapper path proves awkward at compile time or on-device, evaluate the bundled `EthernetSSLClient` or another TLSSocket-based wrapper before reaching for external libraries.
 - If the Mbed socket path still proves impractical in real FTPS testing, evaluate `SSLClient` as the fallback prototype path.
-- Do not start with a custom TLS adapter unless both higher-level approaches fail.
 
 ### Required go/no-go transport spike before broad refactor
 
@@ -429,11 +412,6 @@ public:
 
   bool dataConnected() const override {
     return dataPlain_.connected() || dataTls_.connected();
-  }
-
-  void closeData() override {
-    dataTls_.stop();
-    dataPlain_.stop();
   }
 
   void closeData() override {
@@ -953,59 +931,55 @@ Verdict for this option:
 
 ### Sample FTPS control flow using the transport abstraction
 
-Regardless of transport choice, the FTP control logic would need to converge toward something like this:
+Regardless of transport choice, the FTP control logic would converge toward something like this:
 
 ```cpp
-static bool ftpConnectAndLogin(FtpSession &session, char *error, size_t errorSize) {
-  FtpEndpoint endpoint = { gServerConfig.ftpHost, gServerConfig.ftpPort };
+static bool ftpsConnectAndLogin(FtpsClient &client,
+                                const FtpsServerConfig &config,
+                                char *error, size_t errorSize) {
+  FtpEndpoint endpoint = { config.host, config.port };
   FtpTlsConfig tls;
-  // REVIEW NOTE (04142026): This cast is safe only if loadConfig() clamps
-  // ftpSecurityMode to valid enum values first. The schema section above
-  // requires clamping invalid values on load, but this sample code does not
-  // enforce it. The real implementation should either assert the range here
-  // or guarantee the invariant in loadConfig().
-  tls.mode = static_cast<FtpSecurityMode>(gServerConfig.ftpSecurityMode);
-  tls.validateServerCert = gServerConfig.ftpValidateServerCert;
-  tls.serverName = gServerConfig.ftpTlsServerName;
-  tls.pinnedFingerprint = gServerConfig.ftpTlsFingerprint;
+  tls.mode = FtpSecurityMode::ExplicitTls;
+  tls.validateServerCert = config.validateServerCert;
+  tls.serverName = config.tlsServerName;
+  tls.pinnedFingerprint = config.fingerprint;
+  tls.rootCaPem = config.rootCaPem;
 
-  if (!session.transport->connectControl(endpoint, tls, error, errorSize)) {
+  if (!client.transport->connectControl(endpoint, tls, error, errorSize)) {
     return false;
   }
 
-  if (!ftpReadResponse(*session.transport, 220, error, errorSize)) {
+  if (!ftpReadResponse(*client.transport, 220, error, errorSize)) {
     return false;
   }
 
   if (tls.mode == FtpSecurityMode::ExplicitTls) {
-    if (!ftpSendCommand(*session.transport, "AUTH TLS", 234, error, errorSize)) {
+    if (!ftpSendCommand(*client.transport, "AUTH TLS", 234, error, errorSize)) {
       return false;
     }
-    if (!session.transport->upgradeControlToTls(tls, error, errorSize)) {
+    if (!client.transport->upgradeControlToTls(tls, error, errorSize)) {
       return false;
     }
-    if (!ftpSendCommand(*session.transport, "PBSZ 0", 200, error, errorSize)) {
+    if (!ftpSendCommand(*client.transport, "PBSZ 0", 200, error, errorSize)) {
       return false;
     }
-    if (!ftpSendCommand(*session.transport, "PROT P", 200, error, errorSize)) {
+    if (!ftpSendCommand(*client.transport, "PROT P", 200, error, errorSize)) {
       return false;
     }
   }
 
-  // REVIEW NOTE (04142026, finding #15): The live firmware already handles
-  // USER -> 230 (logged in, skip PASS) and USER -> 331 (need password).
-  // With TLS client-certificate auth, the server may also return 232 (user
-  // logged in, authorized by security data exchange).  Replicate the
-  // existing live-code pattern rather than hardcoding a single expected code.
+  // USER handling must support multiple response codes:
+  // - 331: server needs a password → send PASS
+  // - 230: already logged in
+  // - 232: authorized via security data exchange (TLS client cert)
   int userCode = 0;
-  if (!ftpSendCommandEx(*session.transport, "USER", gServerConfig.ftpUser,
+  if (!ftpSendCommandEx(*client.transport, "USER", config.user,
                         userCode, error, errorSize)) {
     return false;
   }
   if (userCode == 331) {
-    // Server needs a password
-    if (!ftpSendFormatted(*session.transport, 230, error, errorSize,
-                          "PASS %s", gServerConfig.ftpPass)) {
+    if (!ftpSendFormatted(*client.transport, 230, error, errorSize,
+                          "PASS %s", config.password)) {
       return false;
     }
   } else if (userCode != 230 && userCode != 232) {
@@ -1013,7 +987,7 @@ static bool ftpConnectAndLogin(FtpSession &session, char *error, size_t errorSiz
     return false;
   }
 
-  if (!ftpSendCommand(*session.transport, "TYPE I", 200, error, errorSize)) {
+  if (!ftpSendCommand(*client.transport, "TYPE I", 200, error, errorSize)) {
     return false;
   }
 
@@ -1021,60 +995,65 @@ static bool ftpConnectAndLogin(FtpSession &session, char *error, size_t errorSiz
 }
 ```
 
-This illustrates the real architectural goal: choose one transport strategy, hide it behind a narrow interface, and keep `ftpConnectAndLogin()`, `ftpStoreBuffer()`, and `ftpRetrieveBuffer()` focused on FTP semantics instead of TLS-library details.
+This illustrates the real architectural goal: choose one transport strategy, hide it behind a narrow interface, and keep the connect/login flow focused on FTP semantics instead of TLS-library details.
 
 ### Required follow-up
 
 - Add compile guards so FTPS can be disabled cleanly if the TLS library is unavailable.
-- Increase timeouts beyond the current `FTP_TIMEOUT_MS` default, because TLS handshake and certificate verification will take longer than plain FTP.
+- Increase timeouts, because TLS handshake and certificate verification will take longer than plain FTP.
 
 ---
 
-## 2. Extend the server config schema
+## 2. Library config types
 
-### Current fields
+### Required types
 
-The current schema is enough for plain FTP only.
-
-### Required new fields
-
-Add at least the following to `ServerConfig`:
+The library must define at least the following public types:
 
 ```cpp
-uint8_t ftpSecurityMode;            // plain / explicit TLS / implicit TLS
-uint8_t ftpTlsTrustMode;            // 0=fingerprint, 1=imported-cert
-bool ftpValidateServerCert;         // fail if certificate check fails
-char ftpTlsServerName[64];          // hostname/SNI for certificate validation
-char ftpTlsCertPath[64];            // internal-only: "" or "/ftps/server_trust.pem"
-char ftpTlsFingerprint[65];         // normalized 64-char uppercase SHA-256 leaf-cert fingerprint
+enum class FtpsTrustMode : uint8_t {
+  Fingerprint = 0,
+  ImportedCert = 1,
+};
+
+struct FtpsServerConfig {
+  const char *host = nullptr;
+  uint16_t port = 21;
+  const char *user = nullptr;
+  const char *password = nullptr;
+  const char *tlsServerName = nullptr;
+  FtpsTrustMode trustMode = FtpsTrustMode::Fingerprint;
+  const char *fingerprint = nullptr;
+  const char *rootCaPem = nullptr;
+  bool validateServerCert = true;
+  bool passiveMode = true;
+};
 ```
 
-Optional but useful:
+Optional debug flag (not part of the public API):
 
 ```cpp
-bool ftpAllowInsecureTls;           // debug-only bring-up switch; default false and hidden from normal UI
+bool allowInsecureTls;           // debug-only bring-up switch; default false
 ```
 
-### Exact trust-mode enum for v1
-
-To reduce implementation drift, lock the v1 trust-mode enum now instead of leaving it as an implied choice.
+### Trust-mode enum
 
 ```cpp
-enum FtpTlsTrustMode : uint8_t {
-  FTP_TLS_TRUST_FINGERPRINT = 0,
-  FTP_TLS_TRUST_IMPORTED_CERT = 1,
+enum class FtpsTrustMode : uint8_t {
+  Fingerprint = 0,
+  ImportedCert = 1,
 };
 ```
 
 Normalization rules:
 
-- missing or zero-initialized trust mode defaults to `FTP_TLS_TRUST_FINGERPRINT`
-- any persisted value greater than `FTP_TLS_TRUST_IMPORTED_CERT` should be clamped back to `FTP_TLS_TRUST_FINGERPRINT` during config load
-- settings-save APIs should reject invalid trust-mode values rather than silently preserving them
+- missing or zero-initialized trust mode defaults to `Fingerprint`
+- any value greater than `ImportedCert` should be clamped to `Fingerprint`
+- invalid trust-mode values should be rejected rather than silently preserved
 
-### Exact filesystem path conventions for v1
+### Imported certificate path conventions
 
-The imported trust certificate should use a canonical internal path rather than an operator-chosen filename.
+If a host application persists imported trust certificates on the filesystem, it should use canonical internal paths:
 
 ```cpp
 static constexpr const char *FTP_TLS_DIR = "/ftps";
@@ -1084,35 +1063,27 @@ static constexpr const char *FTP_TLS_TRUST_CERT_TMP_PATH = "/ftps/server_trust.p
 
 Path rules:
 
-- `ftpTlsCertPath[0] == '\0'` means no imported trust certificate is present
-- if an imported trust certificate is present, `ftpTlsCertPath` should be exactly `FTP_TLS_TRUST_CERT_PATH`
-- do not allow arbitrary filesystem paths through the settings UI or settings API
-- if an older experimental config contains another path, normalize it to `FTP_TLS_TRUST_CERT_PATH` on next successful save
-- import and replace operations should write to `FTP_TLS_TRUST_CERT_TMP_PATH` first and then rename atomically to `FTP_TLS_TRUST_CERT_PATH`
+- empty cert path means no imported trust certificate is present
+- do not allow arbitrary filesystem paths
+- import and replace operations should write to a temp path first and then rename atomically
 
-### Recommended validation defaults for v1
+### Recommended validation defaults
 
-Lock the following defaults now:
-
-- `ftpValidateServerCert` should default to `true`
-- `ftpAllowInsecureTls` should default to `false`
-- if `ftpAllowInsecureTls` is retained at all, it should remain a debug/build-time escape hatch and should **not** be exposed in the normal settings UI or Notehub-delivered settings flows
+- `validateServerCert` should default to `true`
+- `allowInsecureTls` should default to `false` and remain debug-only
 
 Production FTPS should fail closed when validation is enabled and trust requirements are not met.
 
-### Exact fingerprint semantics for v1
+### Fingerprint semantics
 
-To reduce UI/API drift, lock the fingerprint rules now.
-
-V1 fingerprint mode should pin the **SHA-256 fingerprint of the presented leaf certificate**.
+V1 fingerprint mode pins the **SHA-256 fingerprint of the presented leaf certificate**.
 
 Canonical stored format:
 
 - 64 uppercase hex characters
 - no separators
-- stored in `ftpTlsFingerprint`
 
-Accepted operator input formats:
+Accepted input formats:
 
 - uppercase or lowercase hex
 - optional `:` separators
@@ -1123,307 +1094,135 @@ Normalization rules:
 - strip spaces, `:`, and `-`
 - uppercase `a-f`
 - require exactly 64 hex characters after normalization
-- reject malformed or empty fingerprints during settings-save validation
+- reject malformed or empty fingerprints
 
 Comparison rules:
 
 - compare the normalized stored fingerprint to the presented **control-channel** leaf certificate fingerprint
 - if the passive data channel presents a different certificate than the control channel, fail the transfer with a certificate-mismatch error
 
-### Clock and hostname rules for v1
+### Clock and hostname rules
 
 The two trust modes should not behave identically.
 
-For `FTP_TLS_TRUST_FINGERPRINT`:
+For `Fingerprint`:
 
 - a trusted current time is **not** required
-- `ftpTlsServerName` is optional when connecting by IP address
-- if `ftpTlsServerName` is provided, use it for SNI when supported by the chosen TLS path
+- `tlsServerName` is optional when connecting by IP address
+- if `tlsServerName` is provided, use it for SNI when supported by the chosen TLS path
 
-For `FTP_TLS_TRUST_IMPORTED_CERT`:
+For `ImportedCert`:
 
 - use normal certificate validation semantics
 - require a trusted current time so certificate date validity can be enforced
-- if `ftpHost` is a hostname and `ftpTlsServerName` is empty, default `ftpTlsServerName` to `ftpHost`
-- if `ftpHost` is an IP address and the certificate identifies a hostname rather than that IP, require `ftpTlsServerName`
-- if the certificate SAN already includes the IP address, `ftpTlsServerName` may remain empty
+- if `host` is a hostname and `tlsServerName` is empty, default `tlsServerName` to `host`
+- if `host` is an IP address and the certificate identifies a hostname rather than that IP, require `tlsServerName`
+- if the certificate SAN already includes the IP address, `tlsServerName` may remain empty
 - if no valid clock is available, fail closed with a certificate-time-specific error rather than silently weakening validation
 
 If the chosen TLS path cannot support fingerprint mode without an already-valid clock, treat that as a transport-selection problem to catch in the Phase 0 spike, not as a reason to weaken the fingerprint design.
 
 ### Why these fields are needed
 
-- `ftpSecurityMode` is required to represent the planned transition state between plain FTP and Explicit TLS FTPS.
-- `ftpTlsTrustMode` is required so the operator can choose between fingerprint pinning and imported PR4100 certificate trust.
-- `ftpValidateServerCert` is required so FTPS is not just encryption-without-authentication.
-- `ftpTlsServerName` is needed when the user connects by IP address but the certificate is issued for a hostname.
-- `ftpTlsCertPath` is needed so imported trust material can be stored outside the main JSON config blob while still recording whether the canonical trust file is present.
-- `ftpTlsFingerprint` is the preferred small-footprint trust model for a self-signed NAS certificate.
+- `trustMode` is required so the application can choose between fingerprint pinning and imported PEM certificate trust.
+- `validateServerCert` is required so FTPS is not just encryption-without-authentication.
+- `tlsServerName` is needed when connecting by IP address but the certificate is issued for a hostname.
+- `rootCaPem` is needed so imported trust material can be provided directly in memory.
+- `fingerprint` is the preferred small-footprint trust model for a self-signed NAS certificate.
 
-### Config persistence changes required
+### Host application persistence guidance
 
-Update:
+The library itself does not persist configuration. Host applications that persist FTPS settings should:
 
-- default config initialization
-- `loadConfig()`
-- `saveConfig()`
-- any migration logic for missing or legacy FTP fields
-
-The existing username/password obfuscation can stay as-is. The new FTPS metadata does not need to be secret, but it must be persisted.
-
-### Recommended storage model for imported trust material
-
-If imported certificate trust is enabled, do **not** store the PEM certificate inline in `server_config.json`.
-
-Recommended approach:
-
-- persist trust-mode metadata in `server_config.json`
-- treat `ftpTlsCertPath` as internal metadata, not a user-editable path
-- store the imported trust certificate at the canonical path `/ftps/server_trust.pem`
-- use `/ftps/server_trust.pem.tmp` for atomic replace writes
-- expose only `cert present` / `replace` / `clear` state in the normal settings JSON
-
-This keeps the path policy deterministic and avoids future drift into multiple unofficial certificate filenames.
+- Store trust-mode metadata alongside other FTP connection settings.
+- Store imported trust certificates at a canonical path if using filesystem storage.
+- Not store PEM certificates inline in main config JSON.
+- Expose only `cert present` / `replace` / `clear` state to the user rather than raw filesystem paths.
 
 ---
 
-## 3. Update the embedded Server Settings page
+## 3. Trust model implementation
 
-### Current state
+### Recommended v1 trust options
 
-The settings page currently exposes only plain FTP fields and toggles:
+The library should support **both** of the following trust models:
 
-- host
-- port
-- user
-- password
-- path
-- enable FTP
-- passive mode
-- auto-backup on save
-- restore on boot
+1. **SHA-256 fingerprint pinning** — preferred default for self-signed NAS certificates
+2. **Imported PEM certificate trust** — fallback for environments where fingerprint verification is awkward
 
-### Required UI additions
+### Why fingerprint pinning is a good first step
 
-Add:
+- Many NAS and embedded deployments use self-signed certificates.
+- Shipping CA bundles on an embedded device adds complexity.
+- Fingerprint pinning is small, predictable, and easy to configure.
 
-- FTP security mode selector:
-  - Plain FTP
-  - FTPS (Explicit TLS)
-- Certificate trust mode selector:
-  - Fingerprint pinning
-  - Imported PR4100 certificate trust
-- Certificate validation toggle
-- TLS server name input
-- Certificate fingerprint input
-- Imported certificate paste/import control
-- Imported certificate present / replace / clear state
-- Warning/help text that passive mode remains required
-- Help text that Implicit TLS is intentionally not part of this implementation plan
+### Imported PEM certificate trust
 
-### Recommended UI behavior
+This should also be supported because:
 
-- If `FTPS (Explicit TLS)` is selected, default the port to `21` unless the user overrides it.
-- If certificate validation is enabled, require either a stored fingerprint or an imported trust certificate.
-- Do **not** silently clear the password field when only TLS metadata changes.
-- Do **not** include raw PEM certificate contents in ordinary settings/status responses.
+- The Mbed TLS socket APIs provide a direct `set_root_ca_cert(...)` path.
+- Importing the server's self-signed PEM certificate may be simpler than custom fingerprint verification in the first release.
+- It provides authenticated TLS rather than encryption-without-authentication.
 
-### Recommended administrator onboarding workflow
+### Recommended behavior
 
-The operator should **not** need to manage filesystem paths manually.
+- Default workflow: fingerprint pinning using `FtpsTrustMode::Fingerprint`
+- Supported fallback: provide PEM certificate data via `rootCaPem` and use `FtpsTrustMode::ImportedCert`
+- If the server certificate changes, transfers will fail until the fingerprint or imported trust certificate is updated
 
-Recommended order of operations:
+### Certificate import limits for v1
 
-1. **Default and easiest path:** paste a SHA-256 fingerprint into the Server Settings page.
-2. **Fallback path:** paste the PR4100 PEM certificate into the Server Settings page.
-3. **Optional convenience later:** allow `.pem` upload from the browser, but store it internally at the canonical path and do not expose filesystem details.
+- Accept **one** PEM certificate block only
+- Reject multiple concatenated `BEGIN CERTIFICATE` blocks in v1
+- Reject binary DER input in v1
+- Normalize CRLF to LF before storage
+- Trim leading and trailing whitespace before validation
+- Reject normalized certificate payloads larger than `4096` bytes
 
-Implementation guidance:
+### Recommended error categories
 
-- treat imported-cert storage as an internal implementation detail
-- do not require the administrator to SCP, FTP, or otherwise copy files onto the Opta manually
-- do not expose `ftpTlsCertPath` as an editable field in the UI
-- surface only operator-facing states such as `certificate present`, `replace certificate`, and `clear certificate`
+Use stable FTPS-specific error categories:
 
-### Is certificate onboarding easier with Implicit TLS?
-
-No, not in any operator-meaningful way.
-
-- Implicit TLS changes when TLS starts.
-- It does **not** remove the need to establish trust.
-- The administrator still needs either a fingerprint or a trusted certificate.
-
-So Implicit TLS is not a better answer to certificate handling, and it should not be chosen for that reason.
-
-### Can verification be automatic?
-
-Only in limited cases.
-
-Strong automatic verification is possible if the device already has a trust anchor it can validate against, for example:
-
-- a publicly trusted CA chain already shipped on-device
-- a private CA certificate already imported into the Opta
-- a previously pinned fingerprint already stored on the Opta
-
-Under the current project assumptions, those are **not** the most likely first-release conditions. A PR4100 on a private LAN is more likely to present a self-signed or otherwise locally managed certificate.
-
-That means the most realistic "easy" workflow is:
-
-- automatic **retrieval** of the presented certificate or fingerprint
-- operator **approval** in the web UI
-- local storage of the approved fingerprint or certificate
-
-This is a Trust On First Use style workflow. It is operationally convenient, but it is **not** the same as independent automatic verification.
-
-### Recommended assisted workflow for v1.5 or later
-
-Add a `Fetch Presented Certificate` or `Test FTPS Connection` button in the Server Settings page.
-
-Recommended behavior:
-
-1. Operator enters host, port, security mode, and optional TLS server name.
-2. Opta connects to the FTPS server.
-3. For Explicit TLS, Opta performs `AUTH TLS` and captures the presented certificate.
-4. UI shows:
-  - SHA-256 fingerprint
-  - subject / common name
-  - issuer
-  - validity dates
-5. Operator clicks either:
-  - `Trust Fingerprint`
-  - `Trust Imported Certificate`
-
-This provides the easiest practical workflow without a separate verifier service, but it should still be framed as operator-approved trust enrollment rather than automatic proof of identity.
-
-### Can trust material be imported from Notehub?
-
-Yes, in principle, but it should **not** be the primary or required workflow for the server device.
-
-Why:
-
-- the server already has a local Ethernet web UI, which is the simpler administrative surface
-- Notehub would add cloud routing, latency, and another failure mode to a task that can be completed locally
-- Notehub transport does not independently verify that the NAS certificate is authentic; it only moves trust material from one place to another
-
-Recommended position:
-
-- local web UI trust enrollment is the primary path
-- Notehub trust enrollment is a possible future remote-management feature
-- if Notehub trust enrollment is ever added, start with **fingerprint delivery** before attempting full PEM delivery
-
-Fingerprint delivery is the more practical Notehub candidate because it is small, single-line data. Full PEM import via Notehub may be possible later, but it is a worse first choice than local web-UI paste/import.
-
-### JavaScript changes required
-
-Update the embedded JS to:
-
-- cache the new DOM elements
-- load the new fields from settings JSON
-- include the new fields in save payloads
-- support import/replace/clear actions for the PR4100 trust certificate
-- optionally support a future `fetch presented certificate` preview flow
-- preserve backward compatibility for existing plain-FTP configs
-
----
-
-## 4. Update the settings APIs
-
-### Current state
-
-The server currently serializes compact FTP settings to API JSON and also accepts FTP updates from at least two server-side settings parsers.
-
-### Required change
-
-Add the new FTPS fields to:
-
-- the settings/status JSON returned to the UI
-- the full settings save path
-- any legacy settings update path still used by the UI or tools
-
-### Fields to add
-
-At minimum:
-
-- `securityMode`
-- `trustMode`
-- `validateServerCert`
-- `tlsServerName`
-- `tlsCertPresent`
-- `tlsFingerprint`
-
-### Exact API token conventions
-
-Use readable string tokens at the HTTP settings boundary and map them to the persisted enum internally:
-
-- `trustMode: "fingerprint"` -> `FTP_TLS_TRUST_FINGERPRINT`
-- `trustMode: "imported-cert"` -> `FTP_TLS_TRUST_IMPORTED_CERT`
-
-Rules:
-
-- do not expose raw numeric enum values to the browser unless the rest of the FTPS settings API is also numeric
-- do not expose `ftpTlsCertPath` in ordinary settings responses
-- use `tlsCertPresent: true|false` for UI state rather than leaking the filesystem path
-
-### Validation rules required
-
-- reject invalid `securityMode` values
-- reject invalid `trustMode` values
-- clamp/validate port values
-- if `securityMode != plain` and `validateServerCert == true`, require trust material
-- if `trustMode == fingerprint`, require a fingerprint
-- if `trustMode == imported-cert`, require an imported PEM trust cert to be present
-- if `securityMode == explicit TLS` and port is missing, default to `21`
-
-### Recommended API split for cert material
-
-To avoid bloating normal settings JSON and to reduce accidental exposure of trust material, the implementation should prefer:
-
-- normal settings API for FTPS metadata
-- dedicated import/replace/clear endpoint for the PEM trust certificate
-
-Recommended v1 endpoint behavior:
-
-- allow direct fingerprint entry through the normal settings-save API
-- allow PEM certificate paste/import through a dedicated endpoint that accepts certificate text and stores it internally at the canonical path
-- return only `tlsCertPresent`, not raw PEM content or filesystem paths, from ordinary settings/status endpoints
-
-### Recommended certificate import limits for v1
-
-Keep the first certificate-import implementation intentionally narrow:
-
-- accept **one** PEM certificate block only
-- reject multiple concatenated `BEGIN CERTIFICATE` blocks in v1
-- reject binary DER input in v1
-- normalize CRLF to LF before storage
-- trim leading and trailing whitespace before validation
-- reject normalized certificate payloads larger than `4096` bytes
-- parse/validate the PEM payload before replacing the existing stored certificate
-- if import, parse, write, or rename fails, preserve the existing stored certificate and return a specific import error
-
-### Recommended operator error model
-
-Use stable FTPS-specific error categories in serial logs and in any API/UI failure surface that already returns machine-readable status.
-
-Recommended categories:
-
-- `ftp-auth-failed`
-- `ftps-auth-tls-rejected`
-- `ftps-tls-handshake-failed`
-- `ftps-missing-trust-material`
-- `ftps-cert-fingerprint-mismatch`
-- `ftps-cert-time-invalid`
-- `ftps-cert-hostname-mismatch`
-- `ftps-cert-import-invalid`
-- `ftps-cert-import-too-large`
-- `ftps-data-tls-connect-failed`
-- `ftps-transfer-final-reply-failed`
+- `FtpsError::AuthTlsRejected`
+- `FtpsError::ControlTlsHandshakeFailed`
+- `FtpsError::CertValidationFailed`
+- `FtpsError::DataTlsHandshakeFailed`
+- `FtpsError::SessionReuseRequired`
+- `FtpsError::LoginRejected`
+- `FtpsError::TransferFailed`
+- `FtpsError::FinalReplyFailed`
 
 Avoid collapsing these into a generic `FTP failed` message when a specific category is available.
 
-Recommended future endpoint behavior:
+---
 
-- add a separate `test/fetch-certificate` style endpoint if assisted trust enrollment is implemented later
-- do **not** depend on Notehub for ordinary local administrator trust onboarding
+## 4. Error reporting
+
+### Required error surface
+
+The library must provide detailed failure information for:
+
+- TLS handshake failed
+- certificate mismatch
+- `AUTH TLS` unsupported/rejected
+- `PBSZ 0` failed
+- `PROT P` failed
+- passive data TLS connection failed
+- transfer completed on data channel but final control reply failed
+
+### Recommended diagnostics
+
+Include the security mode in serial diagnostics:
+
+- `ftp`
+- `ftps-explicit`
+
+This makes field debugging much easier for host applications.
+
+The transport boundary should also expose:
+
+- `getPeerCertFingerprint()` — for diagnostics and assisted trust enrollment
+- `getLastTlsError()` — for debugging TLS-specific failures
 
 ---
 
@@ -1476,31 +1275,31 @@ This sequence is retained only as background if project scope changes later:
 5. send `PROT P`
 6. continue with `USER`, `PASS`, `TYPE I`, `PASV`, secure data channel, `STOR`/`RETR`
 
-### Concrete functions that must change
+### Concrete library methods
 
-#### `FtpSession`
+#### `FtpsClient`
 
-Replace the single raw `EthernetClient ctrl` model with a session that can track:
+The main client class. Wraps the transport and exposes high-level operations:
 
-- control-channel client
-- control-channel secure/plain state
-- security mode
-- certificate validation settings
+- `connect(config)` — connect and login with the given `FtpsServerConfig`
+- `store(remotePath, data, length)` — upload data to a remote file
+- `retrieve(remotePath, buffer, bufferSize, &bytesRead)` — download a remote file into a buffer
+- `quit()` — clean disconnect
 
-#### `ftpSendCommand()`
+#### Transport abstraction
 
-Must operate on an abstracted `Client`/socket rather than assuming a plain Ethernet socket.
+Must operate on an abstracted socket interface rather than assuming a plain Ethernet socket.
 
-#### `ftpConnectAndLogin()`
+#### `connect()`
 
 Must branch on security mode:
 
-- plain FTP: current logic
-- explicit TLS: `AUTH TLS`, TLS handshake, `PBSZ 0`, `PROT P`, then login
+- plain FTP: TCP connect, banner, USER/PASS
+- explicit TLS: TCP connect, banner, `AUTH TLS`, TLS handshake, `PBSZ 0`, `PROT P`, then USER/PASS
 
-Implicit TLS is out of scope for the current implementation plan and should not add code branches to the first FTPS release.
+Implicit TLS is out of scope for v1 and should not add code branches to the first release.
 
-It must also produce better error strings for:
+Must produce specific error codes for:
 
 - TLS handshake failure
 - certificate validation failure
@@ -1508,163 +1307,128 @@ It must also produce better error strings for:
 - `PBSZ` rejection
 - `PROT P` rejection
 
-#### `ftpEnterPassive()`
+#### `enterPassive()`
 
 The passive address/port parsing can remain mostly the same, but the returned host/port must be used to open a **secure** data channel whenever FTPS is selected.
 
-#### `ftpStoreBuffer()` and `ftpRetrieveBuffer()`
+#### `store()` and `retrieve()`
 
-These are the most important changes after `ftpConnectAndLogin()`.
-
-Current behavior:
-
-- they always open a plain `EthernetClient` for the data socket
+These are the most important operations after `connect()`.
 
 Required FTPS behavior:
 
-- open a TLS-wrapped data socket when `securityMode != plain`
+- open a TLS-wrapped data socket when explicit TLS is active
 - ensure data protection is `PROT P`, not `PROT C`
-- preserve the existing buffer semantics and error handling
 - increase timeout and error reporting around handshake and transfer completion
 
-#### `ftpQuit()`
+#### `quit()`
 
 Must close the TLS-wrapped control channel cleanly, then close the underlying socket.
 
 ---
 
-## 6. Apply the refactor to every current FTP consumer
+## 6. Validation and regression testing
 
-Even though the call sites may not need large logic changes, they must all be validated after the transport layer changes.
+After the transport layer changes, all library operations must be validated:
 
-### Required regression targets
+### Required test targets
 
-#### Manual configuration backup/restore
+- `store()` — upload a file, verify it appears on the server
+- `retrieve()` — download a file, verify contents match
+- `connect()` then `quit()` — clean session lifecycle
+- Repeated `store()`/`retrieve()` cycles — memory stability
+- Large file transfers — verify no truncation or timeout
+- Invalid credentials — verify clean error
+- Invalid fingerprint — verify clean rejection
+- Expired/wrong certificate — verify clean rejection
 
-- `performFtpBackupDetailed()`
-- `performFtpRestoreDetailed()`
+### Reference server interoperability
 
-#### Per-client cached config backup/restore
+Test against all three v1 reference servers:
 
-- manifest upload/download
-- per-client config JSON upload/download
+1. **WD My Cloud PR4100** — NAS with built-in FTPS
+2. **vsftpd** — Linux, widely deployed
+3. **FileZilla Server** — cross-platform, GUI-managed
 
-#### Cold-tier history archive
+For each server, confirm:
 
-- monthly archive upload
-- archived month load
-- cached FTP history retrieval path
-
-#### Archived client export
-
-- JSON archive upload for historical client data
-
-#### Browser-accessed archive download endpoint
-
-- FTP-backed file fetch that returns archive content to the browser
-
-The key point: FTPS is not only a manual backup button feature. It affects the entire cold-tier archive system that depends on FTP helpers.
+- `AUTH TLS` is accepted
+- passive data channels work with `PROT P`
+- TLS session reuse behavior (if the server requires it)
+- certificate presentation matches expectations
 
 ---
 
-## 7. Add FTPS-specific diagnostics and logging
-
-### Required changes
-
-Add detailed failure messages for:
-
-- TLS handshake failed
-- certificate mismatch
-- `AUTH TLS` unsupported/rejected
-- `PBSZ 0` failed
-- `PROT P` failed
-- passive data TLS connection failed
-- transfer completed on data channel but final control reply failed
-
-### Recommended logging improvement
-
-Include the selected security mode in serial logs and, where appropriate, in API responses:
-
-- `ftp`
-- `ftps-explicit`
-
-This will make field debugging much easier.
-
----
-
-## 8. Update documentation and warnings
+## 7. Documentation
 
 Update at least:
 
-- `README.md`
-- server settings help text
-- any backup/restore section that still describes FTP as plaintext-only
-- release notes when the work is implemented
-
-Also update any existing comments that currently say secure transport is a future enhancement.
+- `README.md` — usage instructions, trust model overview, examples reference
+- `CHANGELOG.md` — version history entries
+- Any existing comments that describe secure transport as a future enhancement
 
 ---
 
-## Certificate Handling Recommendation
+## Pre-Implementation Design Decisions (April 15 2026)
 
-### Recommended v1 trust options
+The following decisions were made during the pre-implementation review to close gaps between documentation and code scaffolding. They are recorded here as the authoritative reference.
 
-The current plan should allow **both** of the following trust models for Explicit FTPS:
+### 1. Method names: `store()` / `retrieve()`
 
-1. fingerprint pinning
-2. imported PR4100 certificate trust
+The public API uses FTP-protocol-native names (`store`, `retrieve`) rather than Arduino-flavored names (`uploadBuffer`, `downloadBuffer`). All headers, docs, and examples have been aligned.
 
-Fingerprint pinning remains the preferred operator-facing default when practical, but imported PR4100 certificate trust is an explicit part of the v1 plan rather than a last-minute fallback.
+### 2. `begin()` initializes the transport
 
-### Preferred default: fingerprint pinning
+`FtpsClient::begin(NetworkInterface *network, ...)` must be called once before `connect()`. It creates the internal `MbedSecureSocketFtpsTransport` using the caller's `NetworkInterface*`. This follows the standard Arduino `begin()` pattern.
 
-For a PR4100 on a private LAN, the most pragmatic first implementation is:
+### 3. Transport ownership: `FtpsClient` owns it internally
 
-- explicit TLS
-- passive mode only
-- SHA-256 certificate fingerprint pinning
+`FtpsClient` creates and destroys its `IFtpsTransport` instance. There is no dependency injection for v1 — the Mbed transport is the only supported path. The transport interface (`IFtpsTransport`) exists so unit tests can mock it and so alternative transports can be added later without changing the public API.
 
-### Why fingerprint pinning is a good first step
+### 4. `FtpsSecurityMode` enum added
 
-- PR4100 deployments are likely to use self-signed certificates.
-- Shipping CA bundles on an embedded device adds complexity.
-- Fingerprint pinning is small, predictable, and easy to expose in the web UI.
+`FtpsSecurityMode { Plain, ExplicitTls, ImplicitTls }` is defined in `FtpsTypes.h` and exposed via `FtpsServerConfig::securityMode`. The default is `ExplicitTls`. `ImplicitTls` and `Plain` are defined for forward compatibility but not implemented in v1.
 
-### Allow imported PR4100 certificate trust as a first-class alternative
+The transport layer also has a parallel `FtpTlsSecurityMode` enum in `IFtpsTransport.h` to keep the transport interface independent of the client-level types. `FtpsClient` maps between them during `connect()`.
 
-This should also be supported in the plan because:
+### 5. Error return pattern: `bool` + `char*` + `lastError()`
 
-- the installed Mbed TLS socket APIs already provide a direct `set_root_ca_cert(...)` style path
-- importing the PR4100 self-signed PEM certificate may be simpler than custom fingerprint verification work in the first release
-- it gives the project a practical fallback if fingerprint pinning is awkward in the chosen transport layer
-- it still provides authenticated TLS rather than encryption-without-authentication
+The primary return is `bool` (success/fail) with a human-readable message in the `char*` buffer. For programmatic error handling, `FtpsClient::lastError()` returns the `FtpsError` enum from the most recent failed operation. New error codes added: `NetworkNotInitialized`, `PassiveModeRejected`, `ConnectionFailed`.
 
-### Recommended behavior
+### 6. Trust helpers declared in `FtpsTrust.h`
 
-- Default operator workflow: fingerprint pinning using `FTP_TLS_TRUST_FINGERPRINT`
-- Supported v1 fallback: import the PR4100 PEM certificate to `/ftps/server_trust.pem` and store `FTP_TLS_TRUST_IMPORTED_CERT`
-- If the PR4100 is not actually using a self-signed leaf certificate, import the appropriate signing certificate instead of assuming the leaf cert is the trust anchor
+`FtpsTrust.h` now declares:
 
-### Drawback
+- `ftpsTrustNormalizeFingerprint()` — strip separators, uppercase, validate length
+- `ftpsTrustFingerprintsMatch()` — constant-time comparison
+- `ftpsTrustValidatePem()` — structural validation of PEM blocks
 
-If the PR4100 certificate changes, backups will fail until the fingerprint or imported trust certificate is updated in TankAlarm.
+These are utility functions, not class methods. Implementation is pending Phase 2.
+
+### 7. Naming conventions verified against Arduino FTP ecosystem (April 15 2026)
+
+A collision scan was performed against four major Arduino FTP libraries: **ESP32_FTPClient** (ldab), **FTPClientServer** (dplasa), **FTPClient_Generic** (khoih-prog), and **ESP-FTP-Server-Lib** (peterus). **No collisions were found.** The `Ftps` prefix on all public symbols, combined with `enum class` instead of `#define` macros, cleanly separates our library from every existing one.
+
+Full analysis and naming rules are documented in `CODE REVIEW/NAMING_CONVENTIONS_04152026.md`.
+
+**Open decision:** `FtpsSecurityMode` (public API) and `FtpTlsSecurityMode` (transport layer) are duplicate enums with identical values. This must be resolved before v1.0 — see options A/B/C in the naming conventions document.
 
 ---
 
-## Current PR4100-Side Assumptions For V1
+## Server-Side Assumptions
 
-The current plan assumes all of the following unless live testing disproves them:
+The library assumes the following about the target FTPS server unless testing disproves them:
 
-- Explicit TLS is enabled on the PR4100 control port used by TankAlarm
+- Explicit TLS is enabled on the server's FTP control port
 - passive mode is available and allowed
-- the NAS supports standard `AUTH TLS`, `PBSZ 0`, and `PROT P`
-- the NAS does **not** require client certificates or mTLS
-- the NAS presents one stable server certificate suitable for fingerprint pinning or PEM import
-- the chosen Opta TLS path can negotiate a compatible TLS version/cipher set with the NAS
-- if the NAS certificate is hostname-bound and TankAlarm connects by IP, the operator can supply `ftpTlsServerName`
-- if the NAS requires data-channel TLS session reuse or another FTPS-specific quirk, that behavior will be detected and documented during the transport spike
+- the server supports standard `AUTH TLS`, `PBSZ 0`, and `PROT P`
+- the server does **not** require client certificates or mTLS
+- the server presents one stable certificate suitable for fingerprint pinning or PEM import
+- the chosen Opta TLS path can negotiate a compatible TLS version/cipher set with the server
+- if the server certificate is hostname-bound and the client connects by IP, the application can supply `tlsServerName`
+- if the server requires data-channel TLS session reuse, that behavior will be detected during the transport spike
 
-These are planning assumptions, not yet verified facts. The transport spike and PR4100 interoperability test pass are where they must be confirmed.
+These are planning assumptions, not verified facts. The transport spike and server interoperability testing are where they must be confirmed.
 
 ---
 
@@ -1672,21 +1436,18 @@ These are planning assumptions, not yet verified facts. The transport spike and 
 
 ## Pros
 
-- Encrypts backup credentials and data in transit.
-- Compatible with the PR4100 feature set indicated by the user manual.
-- Keeps the current backup architecture intact; no new gateway is required.
-- Lets the server continue using passive-mode remote file storage instead of redesigning archive storage.
-- Improves security for both manual backup/restore and cold-tier historical archive traffic.
+- Encrypts FTP credentials and file data in transit.
+- Compatible with common NAS FTPS feature sets.
+- Keeps existing FTP-based workflows intact; no new gateway is required.
+- Passive-mode remote file storage continues to work without redesigning storage architecture.
 
 ## Cons
 
-- The implementation cost is much higher than the current plain FTP code.
+- The implementation cost is higher than plain FTP.
 - A TLS-capable Ethernet client for Opta must be selected, integrated, and validated.
 - TLS handshakes will increase RAM use, flash use, latency, and timeout pressure.
-- Self-signed NAS certificates introduce certificate-management overhead.
-- Some FTPS servers are picky about data-channel protection and TLS session reuse; PR4100 interoperability must be tested, not assumed.
-- This secures only the backup/archive channel; it does not add HTTPS to the TankAlarm web UI.
-- The server sketch embeds raw HTML/JS in the `.ino`, so UI/schema drift is a real maintenance risk during refactor.
+- Self-signed server certificates introduce certificate-management overhead.
+- Some FTPS servers are picky about data-channel protection and TLS session reuse; interoperability must be tested, not assumed.
 
 ---
 
@@ -1697,33 +1458,25 @@ The major FTPS risks are not all equal. The current ranking is:
 1. **Highest risk:** Explicit FTPS transport behavior on-device
   - `AUTH TLS` control-channel upgrade must work reliably with the chosen transport.
   - Protected passive data channels must work for both `STOR` and `RETR`.
-  - If this cannot be made stable on the Opta, the FTPS project could fail regardless of UI/config work.
+  - If this cannot be made stable on the Opta, the FTPS library cannot ship.
 
 2. **High risk:** TLS session reuse on the passive data channel *(added 04142026)*
   - Many FTPS servers require the data channel to present the same TLS session ID/ticket as the control channel.
   - This is one of the most common real-world FTPS interoperability failures.
-  - If the PR4100 requires session reuse and the chosen Mbed TLS transport does not support it, every `STOR` and `RETR` will fail even though the control channel works.
+  - If the target server requires session reuse and the chosen Mbed TLS transport does not support it, every `STOR` and `RETR` will fail even though the control channel works.
   - This must be an explicit test in the Phase 0 spike, not a deferred discovery.
 
-3. **High risk:** PR4100 interoperability details
-  - `AUTH TLS`, `PBSZ 0`, `PROT P`, passive-mode behavior, and transfer-completion replies must all behave as expected against the actual NAS.
-  - NAS quirks are a bigger risk than generic FTPS theory.
+3. **High risk:** Server interoperability details
+  - `AUTH TLS`, `PBSZ 0`, `PROT P`, passive-mode behavior, and transfer-completion replies must all behave as expected against the actual target server.
+  - Server quirks are a bigger risk than generic FTPS theory.
 
 4. **High risk:** Resource pressure under repeated TLS transfers
   - TLS handshakes will increase RAM use, latency, timeout pressure, and watchdog sensitivity.
-  - Archive-related flows are the most likely place for this to show up.
+  - Repeated transfers are the most likely place for this to show up.
 
-5. **Medium-high risk:** Regression surface across all FTP-backed features
-  - This is not just a manual backup button feature.
-  - Client-config manifests, archive flows, historical export, and browser download paths all rely on the same helper layer.
-
-6. **Medium risk:** Settings/UI/API consistency
-  - The server sketch embeds raw HTML/JS in the `.ino`.
-  - Schema drift between config, API, and UI is a realistic maintenance failure mode.
-
-7. **Medium risk, not a likely fatal blocker:** Certificate trust handling
+5. **Medium risk, not a likely fatal blocker:** Certificate trust handling
   - Fingerprint pinning is planned and still preferred.
-  - Imported PR4100 certificate trust is now an allowed v1 trust model and reduces the chance that certificate handling alone blocks the release.
+  - Imported PEM certificate trust is an allowed v1 trust model and reduces the chance that certificate handling alone blocks the release.
   - Certificate handling becomes fatal only if neither fingerprint pinning nor imported-cert trust can be made reliable in the chosen TLS path.
 
 ---
@@ -1744,20 +1497,20 @@ The major FTPS risks are not all equal. The current ranking is:
 
 - Run the `TLSSocketWrapper` compile/device spike first.
 - Prove `AUTH TLS` -> TLS control upgrade -> `PBSZ 0` -> `PROT P` -> protected passive `STOR`/`RETR`.
-- **Test TLS session reuse on the data channel** *(added 04142026)*: verify whether the PR4100 requires the passive data connection to reuse the control channel's TLS session. If it does, confirm that the chosen transport can propagate the session. This is a common FTPS interop failure and must be caught in the spike, not later.
+- **Test TLS session reuse on the data channel** *(added 04142026)*: verify whether the target server requires the passive data connection to reuse the control channel's TLS session. If it does, confirm that the chosen transport can propagate the session.
 - Lock validation defaults in code:
-  - `ftpValidateServerCert = true`
-  - `ftpAllowInsecureTls = false`
+  - `validateServerCert = true`
+  - `allowInsecureTls = false`
 - Lock fingerprint normalization and comparison rules.
 - Lock imported-cert parsing limits and atomic-replace behavior.
 - Lock clock/hostname behavior for fingerprint and imported-cert modes.
-- Record the actual PR4100 interoperability results and any compatibility constraints.
+- Record actual server interoperability results and any compatibility constraints.
 
-## Phase 1 — Schema, API, and UI surface
+## Phase 1 — Library types and API surface
 
-- Add new config fields.
-- Add settings API fields, validation, and stable error categories.
-- Add settings UI fields and trust-enrollment workflow.
+- Define `FtpsServerConfig`, `FtpsTrustMode`, `FtpsError` types.
+- Implement `FtpsClient` public API.
+- Implement transport abstraction interface.
 
 ## Phase 2 — FTPS transport integration
 
@@ -1786,28 +1539,23 @@ The major FTPS risks are not all equal. The current ranking is:
 
 ## Functional
 
-- Explicit TLS backup succeeds to PR4100.
-- Explicit TLS restore succeeds from PR4100.
+- Explicit TLS upload succeeds to target server.
+- Explicit TLS download succeeds from target server.
 - Passive-mode data channel works for both `STOR` and `RETR`.
-- Archive month upload succeeds.
-- Archive month retrieval succeeds.
-- Archived client export succeeds.
-- Browser archive download succeeds.
 
 ## Negative cases
 
 - Wrong port
 - Wrong username/password
 - Wrong fingerprint
-- Certificate changed on PR4100
-- PR4100 set to require TLS while TankAlarm is still configured for plain FTP
+- Certificate changed on server
 - FTPS selected with missing trust data when validation is enabled
 
 ## Resource/stability
 
 - Watchdog remains healthy during repeated handshake + transfer cycles.
-- Memory usage remains stable during 8KB to 16KB archive transfers.
-- Timeouts are long enough for the PR4100 but still fail cleanly.
+- Memory usage remains stable across multiple transfers.
+- Timeouts are long enough for the target server but still fail cleanly.
 
 ---
 
@@ -1822,9 +1570,9 @@ Explore the transport options in this order:
 3. `SSLClient` as the fallback Arduino-style prototype path
 4. Custom TLS wrapper only if the higher-level options prove unworkable
 
-That gives the project the best balance of:
+That gives the library the best balance of:
 
-- NAS compatibility
+- server compatibility
 - contained code churn
 - practical security improvement
 - manageable testing scope
@@ -1858,20 +1606,16 @@ the FTPS implementation checklist, the FTPS repository review doc, and the live 
 | # | Severity | Issue | Where | Status |
 |---|----------|-------|-------|--------|
 | 6 | **Low** | Phase numbering mismatch: this doc uses 5 phases (0–4), the checklist uses 12 phases (0–11). Phase numbers are not traceable between the two docs. | `FTPS_IMPLEMENTATION_CHECKLIST_04132026.md` | **Fixed**: Phase-mapping table added to checklist. |
-| 7 | **Low** | Interface renamed from `IFtpTransport` (this doc) to `IFtpsTransport` (repo review) without noting the change. | `FTPS_REPOSITORY_REVIEW_04132026.md` | **Fixed**: Naming note added to repo review. |
+| 7 | **Low** | Interface renamed from `IFtpTransport` (this doc) to `IFtpsTransport` (repo review) without noting the change. | `FTPS_REPOSITORY_REVIEW_04132026.md` | **Fixed**: Repository docs and scaffold now standardize on `IFtpsTransport`; this document keeps `IFtpTransport` only in legacy option-comparison snippets. |
 | 8 | **Medium** | `FtpsTrustMode` enum starts at `1` in the repo review, but `FTP_TLS_TRUST_FINGERPRINT = 0` in this doc. A zero-initialized value would mean "fingerprint" in one doc and "invalid/undefined" in the other. | `FTPS_REPOSITORY_REVIEW_04132026.md` | **Fixed**: Repo review enum changed to start at `0`. |
 
-### Items verified correct against live firmware
+### Items verified correct against reference firmware
 
-- `ServerConfig` FTP fields (all 9): exact match.
-- `FtpSession` struct: contains only `EthernetClient ctrl` as claimed.
-- All 6 FTP helper functions present with correct signatures.
-- `FTP_PORT_DEFAULT` = `21`.
+- FTP session uses `EthernetClient ctrl` as the sole transport.
 - Networking includes limited to `PortentaEthernet.h` and `Ethernet.h`.
-- FTP credential obfuscation at rest: confirmed (`encodeFtpCredential`/`decodeFtpCredential` with XOR + hex encoding, lines ~3102–3171).
-- Cold-tier archive functions exist: `archiveMonthToFtp()`, `loadFtpArchiveCached()`, `archiveClientToFtp()`, `FtpArchiveCache`, and the `/api/history/archived` endpoint.
-- `performFtpBackupDetailed()` and `performFtpRestoreDetailed()` present.
-- `ftpBackupClientConfigs()` and `ftpRestoreClientConfigs()` present.
+- FTP credential obfuscation at rest confirmed (XOR + hex encoding pattern).
+- All FTP helper functions present with expected signatures.
+- `FTP_PORT_DEFAULT` = `21`.
 
 ### Remaining observation
 
@@ -1888,15 +1632,15 @@ These were found while reviewing the April 14 updates to this plan.
 | 11 | **Medium** | Option C (`dataConnected()`) | Connection status inferred from object existence instead of real socket state. | **Noted 04142026**: Review note added in scaffold; explicit `dataReady_` flag recommended for real implementation. |
 | 12 | **Medium** | Checklist/repo wording around passive data TLS | "TLS session resumption" used as a hard requirement; server-dependent in practice. | Wording adjustment deferred — addressed in checklist Phase 0 context. |
 | 13 | **Medium** | Option C (`MbedSecureSocketFtpTransport`) | `ctrlConnected()` short-circuited to `true` whenever `ctrlTls_` wrapper existed, even on failed handshake. | **Fixed 04142026**: Replaced with `ctrlReady_` flag that is set only after successful handshake and cleared on every failure/close path. |
-| 14 | **Medium** | `IFtpTransport` boundary vs diagnostics | Transport abstraction has no peer-certificate or verification-result exposure for later trust/diagnostics. | **Open**: Recommend adding `getPeerCertFingerprint()` and `getLastTlsError()` to transport interface before implementation. See new finding #16. |
+| 14 | **Medium** | `IFtpTransport` boundary vs diagnostics | Transport abstraction has no peer-certificate or verification-result exposure for later trust/diagnostics. | **Fixed 04152026**: Scaffold `IFtpsTransport` now includes `getPeerCertFingerprint()` and `getLastTlsError()`. Remaining work is wiring the values in concrete transport implementations. |
 | 15 | **Medium** | Sample `ftpConnectAndLogin()` | Hardcoded `USER` → `331`, `PASS` → `230`. Live firmware already accepts `230`\|`331` after `USER`, and RFC 4217 allows `232`. | **Fixed 04142026**: Sample now accepts `230` and `232` after `USER` and sends `PASS` only when server replies `331`. |
 
 ### New findings from second deep review (April 14, 2026)
 
 | # | Severity | Location | Issue | Recommendation |
 |---|----------|----------|-------|----------------|
-| 16 | **Medium** | `IFtpTransport` interface | The interface has no way to expose the peer certificate fingerprint or TLS error details. The UI plan (Section 3) calls for fingerprint preview and trust enrollment, and the test plan requires verifying fingerprint validation failures. Without transport-level access to this data, the UI and test requirements cannot be satisfied. | Add optional methods to `IFtpTransport`: `virtual bool getPeerCertFingerprint(char *out, size_t outLen) { return false; }` and `virtual int getLastTlsError() { return 0; }`. Provide default no-op implementations so plain-FTP transports are unaffected. |
-| 17 | **Medium** | Live firmware `ftpReadResponse()` signature | The live code passes `EthernetClient &` to `ftpReadResponse()`. The transport abstraction replaces `EthernetClient` with `IFtpTransport` which exposes `ctrlRead()`/`ctrlWrite()`. The doc does not show how `ftpReadResponse()` and `ftpSendCommand()` adapt to the new interface. | Add a sample `ftpReadResponse(IFtpTransport &transport, ...)` signature showing how the byte-level read loop would use `transport.ctrlRead()` instead of `client.read()`. This is the most surgery-heavy refactor in the plan and needs an explicit migration note. |
+| 16 | **Medium** | `IFtpTransport` interface | The original draft interface had no way to expose the peer certificate fingerprint or TLS error details. The UI plan (Section 3) calls for fingerprint preview and trust enrollment, and the test plan requires verifying fingerprint validation failures. | **Fixed 04152026**: Optional `getPeerCertFingerprint()` and `getLastTlsError()` methods were added to scaffold `IFtpsTransport` with default no-op behavior. |
+| 17 | **Medium** | Live firmware `ftpReadResponse()` signature | The live code passes `EthernetClient &` to `ftpReadResponse()`. The transport abstraction replaces `EthernetClient` with `IFtpsTransport` which exposes `ctrlRead()`/`ctrlWrite()`. The doc does not show how `ftpReadResponse()` and `ftpSendCommand()` adapt to the new interface. | Add a sample `ftpReadResponse(IFtpsTransport &transport, ...)` signature showing how the byte-level read loop would use `transport.ctrlRead()` instead of `client.read()`. This is the most surgery-heavy refactor in the plan and needs an explicit migration note. |
 | 18 | **Medium** | Live firmware data-channel lifetime | In the live code, `ftpStoreBuffer()` and `ftpRetrieveBuffer()` create and destroy a local `EthernetClient dataClient` inside the function body. The transport abstraction expects data-channel lifetime to be managed by the transport object. The plan does not describe how to migrate from function-local data sockets to transport-managed data channels. | Add a migration note: each `ftpStoreBuffer()`/`ftpRetrieveBuffer()` call should (a) call `transport.openProtectedDataChannel()` where it currently calls `dataClient.connect()`, (b) use `transport.dataWrite()`/`transport.dataRead()` for I/O, and (c) call `transport.closeData()` where it currently calls `dataClient.stop()`. |
 | 19 | **Low** | `FTP_TIMEOUT_MS` = 8000ms | The current timeout is tuned for plain FTP. TLS handshake on constrained hardware like Opta can take 2–5 seconds. With both control and data handshakes, the default 8-second timeout may fire during a normal connection setup. | Recommend a separate `FTP_TLS_HANDSHAKE_TIMEOUT_MS` (e.g. 15000ms) for TLS-related operations, or increase `FTP_TIMEOUT_MS` globally with a note explaining the TLS budget. |
 | 20 | **Low** | Option A `closeAll()` | `closeAll()` resets `dataUpgraded_` and `ctrlUpgraded_` flags, but `closeData()` only resets `dataUpgraded_`. If `upgradeControlToTls()` fails partway, `ctrlUpgraded_` stays `false` (correct), but nothing calls `closeAll()` on the failure path—the caller would need to do it. The scaffold doesn't show a failure-path cleanup pattern. | Add a note that the caller (or a RAII guard) must call `closeAll()` on any failure after `connectControl()` succeeds. |
@@ -1915,7 +1659,7 @@ These were found while reviewing the April 14 updates to this plan.
 ## Implementation Plan Readiness Assessment
 
 **Assessment date:** April 14, 2026
-**Reviewer:** Cross-reference review against live firmware (`TankAlarm-112025-Server-BluesOpta.ino`) and all three FTPS design documents.
+**Reviewer:** Cross-reference review against reference firmware and all three FTPS design documents.
 
 ### Overall verdict: CONDITIONALLY READY — one blocking spike required
 
@@ -1938,9 +1682,9 @@ After those documentation fixes, the spike plan is valid as the Phase 0 gate.
 | Area | Status | Notes |
 |------|--------|-------|
 | **Scope definition** | Ready | Explicit TLS only, plain FTP retained, Implicit TLS deferred. Clear and consistently stated across all three docs. |
-| **Config schema** | Ready | All 7 new `ServerConfig` fields defined with types, defaults, and normalization rules. Backward compatibility addressed (legacy configs load cleanly). |
+| **Config schema** | Ready | Core library config types are defined in `FtpsTypes.h` with trust-mode enum ordinals and safe defaults. Host-application persistence rules are documented but intentionally left outside the v1 library implementation. |
 | **Trust model** | Ready | Two v1 modes (fingerprint pinning + imported PEM cert) fully specified. Enum values, canonical paths, and validation behavior locked. |
-| **Transport abstraction** | Ready | `IFtpTransport` interface is well-defined with 4 candidate implementations ranked in priority order. Scaffolding code has been reviewed and corrected through the implementation-plan and spike-plan reviews. |
+| **Transport abstraction** | Ready | `IFtpsTransport` is defined in the repository scaffold, including diagnostic hooks (`getPeerCertFingerprint()`, `getLastTlsError()`). Candidate transport options remain ranked in priority order. |
 | **FTP command flow** | Ready | Sample `ftpConnectAndLogin()` now matches live firmware patterns. `AUTH TLS` → `PBSZ 0` → `PROT P` → login sequence is correct per RFC 4217. |
 | **UI plan** | Ready | Settings fields, trust enrollment workflow, and UX decisions all specified. Conditional warnings for missing trust data defined. |
 | **Testing plan** | Ready | Functional, negative-case, and stability test checklists cover all FTP consumer call sites. PR4100 interop checklist is explicit. |
@@ -1956,9 +1700,9 @@ After those documentation fixes, the spike plan is valid as the Phase 0 gate.
 | **TLS session reuse verification** | **High** | During the spike, verify whether the PR4100 requires TLS session reuse on the data channel. If it does, confirm `TLSSocketWrapper` supports session ticket or session ID resumption. This is the #1 interop risk. |
 | **Spike trust bootstrap** | **High** | Do not rely on `VALIDATE_CERT = false` in the current sample sketch; it is not a real verification-bypass path. For the first meaningful run, provide `ROOT_CA_PEM` or build a separate variant that explicitly customizes the Mbed TLS auth mode. |
 | **Conditional session-reuse blocker** | **High** | The public `TLSSocketWrapper` API does not expose an obvious session handoff helper. If the PR4100 enforces data-channel TLS session reuse, treat that as a likely blocker for Option C until a lower-level Mbed TLS sharing path or NAS policy change is proven. |
-| **`ftpReadResponse` / `ftpSendCommand` migration** | **High** | The plan shows the transport interface but does not show how the existing `ftpReadResponse(EthernetClient &, ...)` adapts to `IFtpTransport &`. Add a migration sketch (finding #17). |
+| **`ftpReadResponse` / `ftpSendCommand` migration** | **High** | The plan shows the transport interface but does not show how the existing `ftpReadResponse(EthernetClient &, ...)` adapts to `IFtpsTransport &`. Add a migration sketch (finding #17). |
 | **Data-channel lifetime migration** | **High** | The live code creates/destroys data sockets inside `ftpStoreBuffer()`/`ftpRetrieveBuffer()`. The transport owns the data socket. Document the function-by-function migration (finding #18). |
-| **Transport diagnostics interface** | **Medium** | Add `getPeerCertFingerprint()` and `getLastTlsError()` to `IFtpTransport` (finding #16) so the UI can support trust enrollment and the test plan can verify cert failures. |
+| **Transport diagnostics interface** | **Medium** | Partially complete: scaffold `IFtpsTransport` already includes `getPeerCertFingerprint()` and `getLastTlsError()`. Next step is wiring real values in the concrete transport and exposing them through client-level diagnostics. |
 | **Fallback path wording** | **Medium** | Keep Option B / Option A described as separate follow-up experiments, not protocol-equivalent fallback steps for Explicit FTPS control upgrade. |
 | **TLS timeout budget** | **Low** | Define a separate handshake timeout or increase `FTP_TIMEOUT_MS` beyond 8000ms for TLS operations (finding #19). |
 | **arduino-cli environment** | **Low** | Install `arduino-cli` with the Opta board package to enable local compile verification before device testing. |
@@ -1975,13 +1719,9 @@ After those documentation fixes, the spike plan is valid as the Phase 0 gate.
 
 ### Summary of review findings
 
-Two full review passes plus a spike-plan review have been completed across the FTPS documents and the live server firmware. A total of **24 findings** were identified:
+Two full review passes plus a spike-plan review have been completed across the FTPS documents and the reference firmware. Most architecture-level findings are now closed in docs and scaffold code. Remaining open items are implementation-facing: session-reuse behavior validation, helper-migration mechanics (`ftpReadResponse` / `ftpSendCommand`), data-channel lifetime migration, and timeout tuning.
 
-- **6 High severity** — 5 fixed, 1 open (finding #22)
-- **13 Medium severity** — 8 fixed, 5 open (findings #12, #14/16, #17, #18, #23)
-- **5 Low severity** — 2 fixed, 3 open (findings #6 fixed in checklist, #19, #20)
-
-No findings invalidate the plan's architecture. The open items are documentation gaps that should be addressed before coding starts but do not require design changes.
+No remaining finding invalidates the planned architecture. The unresolved items are concrete implementation checkpoints that should be addressed during Phase 0 and early Phase 2.
 
 ### Go/No-Go recommendation
 
