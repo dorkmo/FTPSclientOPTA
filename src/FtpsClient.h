@@ -32,6 +32,13 @@ public:
   /// Connect to the FTPS server described by config.
   bool connect(const FtpsServerConfig &config, char *error, size_t errorSize);
 
+  /// Create a remote directory via MKD.
+  bool mkd(const char *remoteDir, char *error, size_t errorSize);
+
+  /// Query the remote file size via SIZE.
+  bool size(const char *remotePath, size_t &remoteBytes,
+            char *error, size_t errorSize);
+
   /// Upload data to remotePath via STOR.
   bool store(const char *remotePath, const uint8_t *data, size_t length,
              char *error, size_t errorSize);

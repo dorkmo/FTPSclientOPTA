@@ -24,6 +24,8 @@ enum class FtpsError {
   FinalReplyFailed,
   PassiveModeRejected,
   ConnectionFailed,
+  DirectoryCreateFailed,
+  SizeQueryFailed,
 };
 
 #endif // FTPS_ERRORS_H

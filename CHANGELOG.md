@@ -14,6 +14,9 @@ All notable changes to this project will be documented in this file.
 - `examples/FileZillaLiveTest/FileZillaLiveTest.ino` for first live Opta-to-FileZilla validation.
 - `examples/WebHarnessLiveTest/WebHarnessLiveTest.ino` with a lightweight Opta-hosted LAN UI for FTPS config input, action triggering, and live status/log monitoring.
 - `CODE REVIEW/WEB_HARNESS_API_REFERENCE_04152026.md` documenting harness auth flow, endpoint contracts, and ready-to-run PowerShell/cURL examples for scripted testing.
+- `CODE REVIEW/APPLICATION_INTEGRATION_REQUIREMENTS_04152026.md` documenting the generic Arduino application integration requirements and the near-term library additions needed to support them.
+- `CODE REVIEW/HARDWARE_AND_FOLLOWUP_CHECKLIST_04152026.md` consolidating the remaining hardware validation and post-validation update work.
+- `FtpsClient::mkd()` and `FtpsClient::size()` for remote directory creation and remote size preflight.
 
 ### Changed
 - Updated README status language to reflect scaffold-present, implementation-pending reality.
@@ -37,3 +40,6 @@ All notable changes to this project will be documented in this file.
 - Reduced transport heap churn by reusing allocated `TCPSocket` instances across reconnects/transfers instead of deleting and reallocating on every close.
 - Added an Mbed TLS 3.x compatibility guard for peer-certificate fingerprint extraction paths.
 - Enhanced `WebHarnessLiveTest` to use POST for config updates, add a lightweight passcode/token auth gate for protected routes, and expose a downloadable text report endpoint for run logs and status snapshots.
+- Updated the implementation checklist and README to track near-term integration requirements for nested remote path creation, remote size preflight, and conditional follow-up work around keepalives, watchdog hooks, and streaming transfers.
+- Refactored `FtpsClient` arg-based FTP command handling so `USER`, `PASS`, `STOR`, `RETR`, `MKD`, and `SIZE` share command-formatting and dispatch logic.
+- Extended `examples/FileZillaLiveTest/FileZillaLiveTest.ino` to exercise `mkd()` and `size()` alongside upload and download flows.

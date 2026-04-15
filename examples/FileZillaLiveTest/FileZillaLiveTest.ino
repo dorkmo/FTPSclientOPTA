@@ -41,8 +41,12 @@ static const char *FTP_FINGERPRINT =
 // using FtpsTrustMode::ImportedCert.
 static const char *ROOT_CA_PEM = nullptr;
 
-static const char *REMOTE_TEST_PATH = "/ftps_test/filezilla_opta_live_test.txt";
+static const char *REMOTE_PARENT_DIR = "/ftps_test";
+static const char *REMOTE_TEST_DIR = "/ftps_test/opta_live";
+static const char *REMOTE_TEST_PATH = "/ftps_test/opta_live/filezilla_opta_live_test.txt";
+static const bool RUN_MKD_TEST = true;
 static const bool RUN_UPLOAD_TEST = true;
+static const bool RUN_SIZE_TEST = true;
 static const bool RUN_DOWNLOAD_TEST = true;
 
 // ============================================================================
@@ -68,6 +72,19 @@ static void reportQuitStatus(FtpsClient &ftps) {
 
 static const char *trustModeName(FtpsTrustMode mode) {
   return mode == FtpsTrustMode::Fingerprint ? "Fingerprint" : "ImportedCert";
+}
+
+static bool ensureRemoteDirectory(const char *remoteDir,
+                                  FtpsClient &ftps,
+                                  char *error,
+                                  size_t errorSize) {
+  if (!ftps.mkd(remoteDir, error, errorSize)) {
+    return false;
+  }
+
+  Serial.print("[PASS] FtpsClient.mkd(): ensured ");
+  Serial.println(remoteDir);
+  return true;
 }
 
 // ============================================================================
@@ -137,6 +154,26 @@ void setup() {
       "Arduino Opta FTPS FileZilla live test\r\n"
       "If you can read this file, upload and TLS negotiation succeeded.\r\n";
 
+  if (RUN_MKD_TEST) {
+    Serial.println("[STEP] FtpsClient.mkd() parent");
+    if (!ensureRemoteDirectory(REMOTE_PARENT_DIR, ftps, error, sizeof(error))) {
+      printClientFailure("FtpsClient.mkd() parent", ftps, error);
+      ftps.quit();
+      reportQuitStatus(ftps);
+      return;
+    }
+
+    if (strcmp(REMOTE_TEST_DIR, REMOTE_PARENT_DIR) != 0) {
+      Serial.println("[STEP] FtpsClient.mkd() nested");
+      if (!ensureRemoteDirectory(REMOTE_TEST_DIR, ftps, error, sizeof(error))) {
+        printClientFailure("FtpsClient.mkd() nested", ftps, error);
+        ftps.quit();
+        reportQuitStatus(ftps);
+        return;
+      }
+    }
+  }
+
   if (RUN_UPLOAD_TEST) {
     Serial.println("[STEP] FtpsClient.store()");
     if (!ftps.store(REMOTE_TEST_PATH,
@@ -151,6 +188,29 @@ void setup() {
     }
     Serial.print("[PASS] FtpsClient.store(): uploaded ");
     Serial.println(REMOTE_TEST_PATH);
+  }
+
+  if (RUN_SIZE_TEST) {
+    size_t remoteBytes = 0;
+    Serial.println("[STEP] FtpsClient.size()");
+    if (!ftps.size(REMOTE_TEST_PATH, remoteBytes, error, sizeof(error))) {
+      printClientFailure("FtpsClient.size()", ftps, error);
+      ftps.quit();
+      reportQuitStatus(ftps);
+      return;
+    }
+
+    Serial.print("[PASS] FtpsClient.size(): remote size = ");
+    Serial.print(remoteBytes);
+    Serial.println(" bytes");
+
+    size_t expectedBytes = strlen(kUploadPayload);
+    if (RUN_UPLOAD_TEST && remoteBytes != expectedBytes) {
+      Serial.print("[WARN] Remote size did not match upload payload length: expected ");
+      Serial.print(expectedBytes);
+      Serial.print(", got ");
+      Serial.println(remoteBytes);
+    }
   }
 
   if (RUN_DOWNLOAD_TEST) {

@@ -267,6 +267,7 @@ This checklist converts the FTPS design note into an ordered implementation plan
 
 ## Phase 7 — Common FTP Helper Validation
 
+- [x] Refactor control-command handling so additional FTP verbs can share reply parsing and error propagation.
 - [ ] Implement `quit()` for secure control-channel shutdown.
 - [ ] Review timeout values for TLS handshakes and slower server responses.
 - [ ] Review buffer sizes for TLS overhead.
@@ -279,20 +280,25 @@ This checklist converts the FTPS design note into an ordered implementation plan
 
 ---
 
-## Phase 8 — Upload and Download Validation
+## Phase 8 — Transfer And Integration Helper Validation
 
 - [ ] Validate `store()` over FTPS against the reference server.
 - [ ] Validate `retrieve()` over FTPS against the reference server.
+- [x] Implement `mkd()` for nested remote directory creation.
+- [x] Implement `size()` for remote file-size preflight.
 - [ ] Confirm error reporting remains readable.
 - [ ] Confirm partial-failure reporting works.
 
 ### Files to Touch Later
 
-- [ ] `src/FtpsClient.cpp` — upload/download implementations
+- [x] `src/FtpsClient.h` — new public helper declarations
+- [x] `src/FtpsClient.cpp` — upload/download plus integration-helper implementations
+- [x] `src/FtpsErrors.h` — any new FTPS-specific error categories needed by `MKD` and `SIZE`
 
 ### Exit Criteria
 
 - [ ] Upload and download both succeed against the reference server in Explicit TLS mode.
+- [ ] Directory creation and remote size preflight work on-device against the reference server.
 
 ---
 
@@ -302,6 +308,7 @@ This checklist converts the FTPS design note into an ordered implementation plan
 - [ ] Validate the download example compiles and runs.
 - [ ] Validate the fingerprint trust example.
 - [ ] Validate the imported PEM trust example.
+- [x] Extend at least one live example or harness to exercise `MKD` and `SIZE` on-device.
 
 ### Examples currently present
 
@@ -315,6 +322,7 @@ This checklist converts the FTPS design note into an ordered implementation plan
 
 - [ ] All example sketches compile cleanly for `arduino:mbed_opta`.
 - [ ] At least upload and download examples verified on hardware.
+- [ ] At least one live example or harness path verifies `MKD` and `SIZE` on hardware.
 
 ---
 
@@ -324,6 +332,9 @@ This checklist converts the FTPS design note into an ordered implementation plan
 - [ ] Validate behavior after temporary network interruption.
 - [ ] Validate that `quit()` and failure paths clean up all resources.
 - [ ] Confirm no memory leaks across multiple transfer cycles.
+- [ ] Measure whether long multi-step workflows need `NOOP` keepalives.
+- [ ] Measure whether watchdog servicing is sufficient around existing library calls.
+- [ ] Measure whether large-payload workflows require a streaming transfer API.
 
 ### Exit Criteria
 
@@ -335,6 +346,8 @@ This checklist converts the FTPS design note into an ordered implementation plan
 
 - [ ] Update README with tested status.
 - [ ] Replace comments that say transport is unvalidated.
+- [ ] Document host-application integration requirements for nested remote paths and variable-size downloads.
+- [ ] Document buffer-owned transfer expectations and the provisional single-client assumption.
 - [ ] Add operator guidance for reference server setup:
   - select Explicit TLS
   - keep passive mode enabled
@@ -361,6 +374,8 @@ This checklist converts the FTPS design note into an ordered implementation plan
 - [ ] Imported PEM trust cert path tested, if that trust mode is enabled
 - [ ] Upload succeeds
 - [ ] Download succeeds
+- [ ] Nested remote directory creation succeeds when the target path does not already exist
+- [ ] `SIZE` returns the expected remote byte count for representative files
 
 ## Negative Cases
 
@@ -375,6 +390,9 @@ This checklist converts the FTPS design note into an ordered implementation plan
 - [ ] TLS required on server while client is configured for plain FTP fails closed
 - [ ] FTPS selected with no trust data fails clearly when validation is enabled
 - [ ] Missing host or port still fails with clear message
+- [ ] Missing remote directory fails clearly before `MKD` support is added, then succeeds cleanly after directory creation is implemented
+- [ ] Malformed or unsupported `SIZE` replies fail with a clear application-facing error
+- [ ] Oversized variable-size downloads are rejected before `RETR` when size preflight is enabled
 
 ## Stability
 
@@ -382,6 +400,8 @@ This checklist converts the FTPS design note into an ordered implementation plan
 - [ ] TLS handshake + transfer completes within timeout budget
 - [ ] Large downloads still complete within timeout
 - [ ] Failure paths always close sockets cleanly
+- [ ] Multi-file workflows do not require manual directory pre-seeding
+- [ ] Hardware validation determines whether `NOOP`, a watchdog callback, or streaming transfer support is actually needed
 
 ---
 
@@ -392,7 +412,7 @@ These items are intentionally deferred so the first release stays narrow and ver
 - [ ] Add Implicit FTPS as a v2 protocol-expansion target after Explicit FTPS is stable
 - [ ] Evaluate active mode as a v2 compatibility feature after passive-mode interoperability is proven
 - [ ] Add capability discovery and directory helpers such as `FEAT`, `PWD`, `MLSD`, and `NLST`
-- [ ] Add file-management helpers such as `DELE`, `RNFR`/`RNTO`, `MKD`, and `RMD`
+- [ ] Add file-management helpers beyond the near-term integration set, such as `DELE`, `RNFR`/`RNTO`, and `RMD`
 - [ ] Add stream-based transfer APIs for larger payloads
 - [ ] Broader CA-bundle trust options beyond fingerprint pinning and imported PEM trust
 - [ ] Dedicated "Test FTPS Connection" example or helper
@@ -409,10 +429,11 @@ These items are intentionally deferred so the first release stays narrow and ver
 4. Implement Explicit TLS control-channel flow.
 5. Implement TLS passive data-channel flow.
 6. Implement upload and download primitives.
-7. Validate trust modes (fingerprint and imported PEM).
-8. Write and validate example sketches.
-9. Test reconnection and stability.
-10. Update docs and publish release notes.
+7. Implement directory-creation and size-preflight helpers needed by downstream Arduino applications.
+8. Validate trust modes (fingerprint and imported PEM).
+9. Write and validate example sketches and live-harness coverage.
+10. Test reconnection, control-idle behavior, watchdog needs, and stability.
+11. Update docs and publish release notes.
 
 ---
 

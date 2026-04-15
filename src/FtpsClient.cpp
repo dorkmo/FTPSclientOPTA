@@ -24,6 +24,7 @@ static const uint32_t FTPS_REPLY_TIMEOUT_MS = 15000;
 static const uint32_t FTPS_DATA_IO_TIMEOUT_MS = 15000;
 static const uint32_t FTPS_FINAL_REPLY_DRAIN_TIMEOUT_MS = 5000;
 static const size_t FTPS_REPLY_BUFFER_SIZE = 256;
+static const size_t FTPS_COMMAND_BUFFER_SIZE = 192;
 static const size_t FTPS_MAX_PEM_SIZE = 4096;
 
 bool hasValue(const char *value) {
@@ -118,6 +119,108 @@ bool formatCommandWithArg(const char *verb,
     }
     return false;
   }
+  return true;
+}
+
+int ftpSendCommandWithArg(IFtpsTransport &transport,
+                          const char *verb,
+                          const char *argument,
+                          char *reply,
+                          size_t replySize,
+                          char *error,
+                          size_t errorSize) {
+  char command[FTPS_COMMAND_BUFFER_SIZE] = {};
+  if (!formatCommandWithArg(verb,
+                            argument,
+                            command,
+                            sizeof(command),
+                            error,
+                            errorSize)) {
+    if (reply != nullptr && replySize > 0) {
+      snprintf(reply,
+               replySize,
+               "%s",
+               hasValue(error) ? error : "FTP command is too long.");
+    }
+    return -1;
+  }
+
+  return ftpSendCommand(transport, command, reply, replySize);
+}
+
+bool containsIgnoreCase(const char *haystack, const char *needle) {
+  if (!hasValue(haystack) || !hasValue(needle)) {
+    return false;
+  }
+
+  size_t needleLen = strlen(needle);
+  for (size_t start = 0; haystack[start] != '\0'; ++start) {
+    size_t matched = 0;
+    while (matched < needleLen && haystack[start + matched] != '\0') {
+      char hay = static_cast<char>(tolower(
+          static_cast<unsigned char>(haystack[start + matched])));
+      char nee = static_cast<char>(tolower(
+          static_cast<unsigned char>(needle[matched])));
+      if (hay != nee) {
+        break;
+      }
+      ++matched;
+    }
+
+    if (matched == needleLen) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool ftpReplyLooksLikeExistingPath(const char *reply) {
+  return containsIgnoreCase(reply, "exist") ||
+         containsIgnoreCase(reply, "already");
+}
+
+bool parseSizeReplyBytes(const char *reply, size_t &remoteBytes) {
+  remoteBytes = 0;
+  if (!hasValue(reply)) {
+    return false;
+  }
+
+  const char *cursor = reply;
+  if (isdigit(static_cast<unsigned char>(cursor[0])) &&
+      isdigit(static_cast<unsigned char>(cursor[1])) &&
+      isdigit(static_cast<unsigned char>(cursor[2]))) {
+    cursor += 3;
+  }
+
+  while (*cursor == ' ' || *cursor == '\t') {
+    ++cursor;
+  }
+
+  if (!isdigit(static_cast<unsigned char>(*cursor))) {
+    return false;
+  }
+
+  size_t parsed = 0;
+  const size_t kMaxSize = static_cast<size_t>(-1);
+  while (isdigit(static_cast<unsigned char>(*cursor))) {
+    unsigned int digit = static_cast<unsigned int>(*cursor - '0');
+    if (parsed > (kMaxSize - digit) / 10U) {
+      return false;
+    }
+    parsed = (parsed * 10U) + digit;
+    ++cursor;
+  }
+
+  while (*cursor == ' ' || *cursor == '\t') {
+    ++cursor;
+  }
+
+  if (*cursor != '\0') {
+    return false;
+  }
+
+  remoteBytes = parsed;
   return true;
 }
 
@@ -312,6 +415,104 @@ bool FtpsClient::begin(NetworkInterface *network, char *error, size_t errorSize)
   memset(_activeRootCaPem, 0, sizeof(_activeRootCaPem));
   memset(_normalizedFingerprint, 0, sizeof(_normalizedFingerprint));
   _connected = false;
+  _lastError = FtpsError::None;
+  return true;
+}
+
+bool FtpsClient::mkd(const char *remoteDir, char *error, size_t errorSize) {
+  clearError(error, errorSize);
+
+  if (_transport == nullptr || !_connected) {
+    return failWith(
+        _lastError,
+        FtpsError::ConnectionFailed,
+        error,
+        errorSize,
+        "Call connect() before mkd().");
+  }
+
+  if (!hasValue(remoteDir)) {
+    return failWith(
+        _lastError,
+        FtpsError::DirectoryCreateFailed,
+        error,
+        errorSize,
+        "remoteDir is required for mkd().");
+  }
+
+  char reply[FTPS_REPLY_BUFFER_SIZE] = {};
+  int code = ftpSendCommandWithArg(*_transport,
+                                   "MKD",
+                                   remoteDir,
+                                   reply,
+                                   sizeof(reply),
+                                   error,
+                                   errorSize);
+  if (code == 257 || code == 250 || code == 521 ||
+      (code == 550 && ftpReplyLooksLikeExistingPath(reply))) {
+    _lastError = FtpsError::None;
+    return true;
+  }
+
+  return failWith(
+      _lastError,
+      FtpsError::DirectoryCreateFailed,
+      error,
+      errorSize,
+      hasValue(reply) ? reply : "MKD was rejected.");
+}
+
+bool FtpsClient::size(const char *remotePath,
+                      size_t &remoteBytes,
+                      char *error,
+                      size_t errorSize) {
+  remoteBytes = 0;
+  clearError(error, errorSize);
+
+  if (_transport == nullptr || !_connected) {
+    return failWith(
+        _lastError,
+        FtpsError::ConnectionFailed,
+        error,
+        errorSize,
+        "Call connect() before size().");
+  }
+
+  if (!hasValue(remotePath)) {
+    return failWith(
+        _lastError,
+        FtpsError::SizeQueryFailed,
+        error,
+        errorSize,
+        "remotePath is required for size().");
+  }
+
+  char reply[FTPS_REPLY_BUFFER_SIZE] = {};
+  int code = ftpSendCommandWithArg(*_transport,
+                                   "SIZE",
+                                   remotePath,
+                                   reply,
+                                   sizeof(reply),
+                                   error,
+                                   errorSize);
+  if (code != 213) {
+    return failWith(
+        _lastError,
+        FtpsError::SizeQueryFailed,
+        error,
+        errorSize,
+        hasValue(reply) ? reply : "SIZE was rejected.");
+  }
+
+  if (!parseSizeReplyBytes(reply, remoteBytes)) {
+    return failWith(
+        _lastError,
+        FtpsError::SizeQueryFailed,
+        error,
+        errorSize,
+        "Server returned a malformed SIZE reply.");
+  }
+
   _lastError = FtpsError::None;
   return true;
 }
@@ -589,40 +790,21 @@ bool FtpsClient::connect(const FtpsServerConfig &config, char *error, size_t err
         hasValue(reply) ? reply : "PROT P was rejected.");
   }
 
-  char command[192] = {};
-  if (!formatCommandWithArg("USER",
-                            _activeConfig.user,
-                            command,
-                            sizeof(command),
-                            error,
-                            errorSize)) {
-    _transport->closeAll();
-    return failWith(
-        _lastError,
-        FtpsError::LoginRejected,
-        error,
-        errorSize,
-        hasValue(error) ? error : "USER command is too long.");
-  }
-
-  code = ftpSendCommand(*_transport, command, reply, sizeof(reply));
+  code = ftpSendCommandWithArg(*_transport,
+                               "USER",
+                               _activeConfig.user,
+                               reply,
+                               sizeof(reply),
+                               error,
+                               errorSize);
   if (code == 331) {
-    if (!formatCommandWithArg("PASS",
-                              _activeConfig.password,
-                              command,
-                              sizeof(command),
-                              error,
-                              errorSize)) {
-      _transport->closeAll();
-      return failWith(
-          _lastError,
-          FtpsError::LoginRejected,
-          error,
-          errorSize,
-          hasValue(error) ? error : "PASS command is too long.");
-    }
-
-    code = ftpSendCommand(*_transport, command, reply, sizeof(reply));
+    code = ftpSendCommandWithArg(*_transport,
+                                 "PASS",
+                                 _activeConfig.password,
+                                 reply,
+                                 sizeof(reply),
+                                 error,
+                                 errorSize);
     if (code != 230 && code != 232) {
       _transport->closeAll();
       return failWith(
@@ -739,23 +921,13 @@ bool FtpsClient::store(const char *remotePath, const uint8_t *data, size_t lengt
         hasValue(error) ? error : "Failed to open the protected passive data channel.");
   }
 
-  char command[192] = {};
-  if (!formatCommandWithArg("STOR",
-                            remotePath,
-                            command,
-                            sizeof(command),
-                            error,
-                            errorSize)) {
-    _transport->closeData();
-    return failWith(
-        _lastError,
-        FtpsError::TransferFailed,
-        error,
-        errorSize,
-        hasValue(error) ? error : "STOR command is too long.");
-  }
-
-  code = ftpSendCommand(*_transport, command, reply, sizeof(reply));
+  code = ftpSendCommandWithArg(*_transport,
+                               "STOR",
+                               remotePath,
+                               reply,
+                               sizeof(reply),
+                               error,
+                               errorSize);
   if (code != 125 && code != 150) {
     _transport->closeData();
     return failWith(
@@ -874,23 +1046,13 @@ bool FtpsClient::retrieve(const char *remotePath, uint8_t *buffer, size_t buffer
         hasValue(error) ? error : "Failed to open the protected passive data channel.");
   }
 
-  char command[192] = {};
-  if (!formatCommandWithArg("RETR",
-                            remotePath,
-                            command,
-                            sizeof(command),
-                            error,
-                            errorSize)) {
-    _transport->closeData();
-    return failWith(
-        _lastError,
-        FtpsError::TransferFailed,
-        error,
-        errorSize,
-        hasValue(error) ? error : "RETR command is too long.");
-  }
-
-  code = ftpSendCommand(*_transport, command, reply, sizeof(reply));
+  code = ftpSendCommandWithArg(*_transport,
+                               "RETR",
+                               remotePath,
+                               reply,
+                               sizeof(reply),
+                               error,
+                               errorSize);
   if (code != 125 && code != 150) {
     _transport->closeData();
     return failWith(

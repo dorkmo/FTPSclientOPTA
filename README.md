@@ -22,6 +22,8 @@ The goal is to provide a reusable, Opta-first FTPS library built on the board's 
 - Passive mode only
 - Binary transfers only
 - Upload and download primitives
+- Remote directory creation for nested application paths
+- Remote size preflight for variable-size downloads
 - SHA-256 fingerprint pinning
 - Imported PEM certificate trust
 - FTPS-specific error reporting suitable for field diagnostics
@@ -31,7 +33,7 @@ The goal is to provide a reusable, Opta-first FTPS library built on the board's 
 - Implicit FTPS
 - Active mode
 - Recursive sync
-- Delete, rename, mkdir, or broader file-management helpers
+- Delete, rename, or broader file-management helpers beyond the current integration set
 - Product-specific UI, config storage, or backup policy
 - Broad multi-board support claims before hardware validation
 
@@ -40,7 +42,7 @@ The goal is to provide a reusable, Opta-first FTPS library built on the board's 
 - Explicit and Implicit FTPS modes under a common client API
 - Optional active-mode transfers in addition to passive mode
 - Capability discovery and directory helpers such as `FEAT`, `PWD`, `MLSD`, and `NLST`
-- File-management helpers such as `DELE`, `RNFR`/`RNTO`, `MKD`, and `RMD`
+- File-management helpers such as `DELE`, `RNFR`/`RNTO`, and `RMD`
 - Stream-oriented transfer APIs in addition to buffer-based helpers
 - Broader certificate and trust-management options
 - Expanded interoperability testing across more FTPS servers
@@ -105,11 +107,20 @@ if (!client.begin(Ethernet.getNetwork(), error, sizeof(error))) {
 }
 
 if (client.connect(config, error, sizeof(error))) {
+	client.mkd("/backup", error, sizeof(error));
+
 	const uint8_t payload[] = "{}";
 	client.store(
 			"/backup/config.json",
 			payload,
 			sizeof(payload) - 1,
+			error,
+			sizeof(error));
+
+	size_t remoteBytes = 0;
+	client.size(
+			"/backup/config.json",
+			remoteBytes,
 			error,
 			sizeof(error));
 
@@ -127,9 +138,24 @@ if (client.connect(config, error, sizeof(error))) {
 }
 ```
 
-The public API surface is `begin()`, `connect()`, `store()`, `retrieve()`, `quit()`, and `lastError()`. `begin()` initializes the transport layer with the Mbed `NetworkInterface` and must be called once before `connect()`. `lastError()` returns an `FtpsError` enum for programmatic error handling alongside the human-readable `char*` error buffer.
+The public API surface is `begin()`, `connect()`, `mkd()`, `size()`, `store()`, `retrieve()`, `quit()`, and `lastError()`. `begin()` initializes the transport layer with the Mbed `NetworkInterface` and must be called once before `connect()`. `lastError()` returns an `FtpsError` enum for programmatic error handling alongside the human-readable `char*` error buffer.
+
+`mkd()` and `size()` have been added for broader host-application integration, but they still need on-device validation across the reference servers before they should be treated as release-ready.
 
 The v1 public config intentionally does not expose `securityMode` or `passiveMode` toggles. Until additional modes are implemented, the library surface is fixed to Explicit FTPS plus protected passive transfers so sketches cannot accidentally rely on unsupported options.
+
+## Near-Term Integration Requirements
+
+For general Arduino applications that need multi-file backup, restore, manifest, or archive workflows on top of this library, the next required items are:
+
+- on-device validation of `mkd()` support so host applications can create nested remote paths without manual server pre-seeding
+- on-device validation of `size()` support so variable-size downloads can be preflighted before `RETR`
+- at least one live example or harness path that exercises directory creation and remote-size preflight on-device
+- documentation for buffer-owned transfer semantics, variable-size download guidance, and the provisional one-client-at-a-time assumption
+- a hardware-based decision on whether `noop()` or a watchdog callback is actually needed for longer multi-step workflows
+- streaming transfer APIs only if measured payload sizes exceed safe RAM ceilings for the supported Opta target
+
+These requirements are tracked as integration follow-up work, not as product-specific behavior inside the library.
 
 ## Trust Model
 
@@ -174,7 +200,9 @@ Before a first experimental release, the project still needs:
 1. Real Opta hardware validation against FileZilla Server and the other reference servers
 2. Protected passive data-channel interoperability checks, especially around TLS session reuse behavior
 3. On-device fingerprint and imported-certificate validation runs
-4. Example compile validation and release hardening
+4. Integration-helper validation for nested remote paths and variable-size download preflight
+5. A hardware-based decision on whether `NOOP`, watchdog hooks, or streaming transfer support are needed for larger application workflows
+6. Example compile validation and release hardening
 
 ## Limitations
 
@@ -189,6 +217,8 @@ Before a first experimental release, the project still needs:
 
 - [Implementation note](CODE%20REVIEW/FTPS_IMPLEMENTATION_04132026.md)
 - [Implementation checklist](CODE%20REVIEW/FTPS_IMPLEMENTATION_CHECKLIST_04132026.md)
+- [Application integration requirements](CODE%20REVIEW/APPLICATION_INTEGRATION_REQUIREMENTS_04152026.md)
+- [Hardware and follow-up checklist](CODE%20REVIEW/HARDWARE_AND_FOLLOWUP_CHECKLIST_04152026.md)
 - [Repository creation plan](CODE%20REVIEW/FTPS_REPOSITORY_REVIEW_04132026.md)
 - [Phase 0 spike plan](CODE%20REVIEW/FTPS_SPIKE_PLAN_04142026.md)
 - [Serial monitor output guide](CODE%20REVIEW/SERIAL_MONITOR_OUTPUT_04152026.md)
