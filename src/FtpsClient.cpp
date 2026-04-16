@@ -122,6 +122,13 @@ bool formatCommandWithArg(const char *verb,
   return true;
 }
 
+// Forward declaration — ftpSendCommand is defined below but called by
+// ftpSendCommandWithArg.
+int ftpSendCommand(IFtpsTransport &transport,
+                   const char *command,
+                   char *buf,
+                   size_t bufLen);
+
 int ftpSendCommandWithArg(IFtpsTransport &transport,
                           const char *verb,
                           const char *argument,
