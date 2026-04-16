@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- New `PyftpdlibLiveTest` example: end-to-end FTPS test against a bundled pyftpdlib server, including `gen_cert.py` and `ftps_server.py` scripts.
+
 ### Changed
 - Updated README to reflect hardware-validated status (all 10 test steps pass on real Opta).
 - Added static IP configuration option to BasicUpload, BasicDownload, and FileZillaLiveTest examples.
