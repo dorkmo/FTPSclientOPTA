@@ -65,6 +65,18 @@ public:
   /// Send QUIT and close all sockets.
   void quit();
 
+  /// Force-close all sockets (no QUIT) and re-run the connect/login/AUTH TLS
+  /// flow using the cached configuration. Use this between large transfers
+  /// to work around Mbed-OS socket teardown issues that can leave the control
+  /// channel in a zombie state. Returns false if reconnect fails.
+  /// Currently supports Fingerprint trust mode only.
+  bool reconnect(char *error, size_t errorSize);
+
+  /// Opt-in: when set true, store() will automatically call reconnect()
+  /// before each upload after the first. Default is false (preserves
+  /// existing single-session behavior). Reset by connect().
+  void setReconnectBetweenStores(bool enabled);
+
   /// Return the error code from the last failed operation.
   FtpsError lastError() const;
 
@@ -84,6 +96,8 @@ private:
   char _activeRootCaPem[kMaxRootCaPemLen] = {};
   char _normalizedFingerprint[65] = {};
   bool _connected = false;
+  bool _reconnectBetweenStores = false;
+  uint32_t _storesSinceConnect = 0;
   FtpsError _lastError = FtpsError::None;
   FtpsTraceCallback _traceCallback = nullptr;
   const char *_lastPhase = "idle";

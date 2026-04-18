@@ -31,19 +31,45 @@ All notable changes to this project will be documented in this file.
     timeout before sending `226`.
   - Device remains alive across backup cycles; no watchdog resets.
 
-  **Known limitation:** the abandon strategy leaks one LWIP socket handle
-  per transfer. The first file of a backup succeeds; subsequent files
-  in the same run fail with `ConnectionFailed` until the device is
-  rebooted. Two follow-up approaches have been evaluated and both
-  trigger device hangs on current Mbed OS 4.5.0:
-  - `delete tls; delete tcp` — TLSSocketWrapper's destructor internally
-    re-invokes the blocking close path.
-  - `tcp->close()` only — LWIP close path blocks when the TLS wrapper
-    still holds BIO callbacks into the TCP socket.
+### Multi-file FTPS backup verified on Arduino Opta (2026-04-17)
 
-  A proper multi-file fix (candidates: pre-allocate and reuse a single
-  `TCPSocket` across PASV cycles, or reconnect the control channel per
-  file) is tracked as follow-up work.
+Following the close-path fix above, multi-file backup runs to a pyftpdlib
+FTPS server were proven end-to-end on real hardware: **8 files uploaded,
+0 failed** in a single session. Two integration-side adjustments were
+required to work around hard limits in the Mbed OS LWIP build shipped with
+`arduino:mbed_opta` 4.5.0:
+
+1. **Reorder the data-socket cleanup** — close the underlying `TCPSocket`
+   first, then `delete` the `TLSSocketWrapper`, then `delete` the
+   `TCPSocket`. Doing the deletes in this order avoids the historical
+   `delete tls` hang because the TCP layer is already in CLOSED state
+   before the TLS destructor unwinds its BIO callbacks. New transport
+   traces:
+   `xport:cleanup:tcp-close` / `tcp-closed` / `tls-delete` / `tls-deleted`
+   / `tcp-delete` / `tcp-deleted`.
+
+2. **Diagnose `SO_LINGER` support at runtime** — the transport now traces
+   `xport:linger-set` on success or `xport:linger-unsupported:<nsapi>` on
+   failure. On Opta this returns `-3002` (`NSAPI_ERROR_UNSUPPORTED`),
+   which means every closed data socket sits in `TIME_WAIT` for ~60 s.
+
+3. **Surface the actual nsapi code on data-channel failures** — when
+   `socket.open()` or `socket.connect()` fails the transport now traces
+   `xport:open-failed:<nsapi>` / `xport:connect-failed:<nsapi>` so the
+   integrator can distinguish socket-pool exhaustion (`-3005`
+   `NSAPI_ERROR_NO_SOCKET`) from transient network errors.
+
+The matching application-side workarounds (release the listening server
+socket during backup, wait for `TIME_WAIT` to drain between files) are
+integrator concerns, not library concerns, and are described in
+[CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md](CODE%20REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md).
+
+The earlier "first file succeeds, subsequent files fail with
+`ConnectionFailed`" limitation is **resolved** at the library level. The
+remaining application-visible cost is throughput: with the integrator
+workarounds in place, an Opta backup of N files takes ~`N * 65` seconds
+because each file must wait a full `TIME_WAIT` interval before opening
+the next data socket.
 
 ### Added
 - New `PyftpdlibLiveTest` example: end-to-end FTPS test against a bundled pyftpdlib server, including `gen_cert.py` and `ftps_server.py` scripts.

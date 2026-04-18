@@ -594,6 +594,11 @@ bool FtpsClient::size(const char *remotePath,
 bool FtpsClient::connect(const FtpsServerConfig &config, char *error, size_t errorSize) {
   clearError(error, errorSize);
 
+  // Reset per-session counters. The reconnect-between-stores opt-in is
+  // intentionally left unchanged so the application does not have to
+  // re-enable it after every reconnect cycle.
+  _storesSinceConnect = 0;
+
   if (_transport == nullptr) {
     return failWith(
         _lastError,
@@ -940,6 +945,19 @@ bool FtpsClient::store(const char *remotePath, const uint8_t *data, size_t lengt
         "Call connect() before store().");
   }
 
+  // Opt-in workaround for Mbed-OS socket teardown issues that can leave
+  // the control channel in a zombie state after a successful upload.
+  // When enabled, perform a full QUIT-less close + reconnect before any
+  // store() after the first one.
+  if (_reconnectBetweenStores && _storesSinceConnect > 0) {
+    tracePhase("store:auto-reconnect");
+    if (!reconnect(error, errorSize)) {
+      tracePhase("store:auto-reconnect-failed");
+      return false;
+    }
+    tracePhase("store:auto-reconnect-ok");
+  }
+
   tracePhase("store:check-remotepath");
   if (!hasValue(remotePath)) {
     return failWith(
@@ -1107,6 +1125,7 @@ bool FtpsClient::store(const char *remotePath, const uint8_t *data, size_t lengt
 
   tracePhase("store:done");
   _lastError = FtpsError::None;
+  ++_storesSinceConnect;
   return true;
 }
 
@@ -1377,6 +1396,81 @@ void FtpsClient::quit() {
   _transport->closeAll();
   tracePhase("quit:done");
   _connected = false;
+}
+
+void FtpsClient::setReconnectBetweenStores(bool enabled) {
+  _reconnectBetweenStores = enabled;
+}
+
+bool FtpsClient::reconnect(char *error, size_t errorSize) {
+  tracePhase("reconnect:entry");
+  clearError(error, errorSize);
+
+  if (_transport == nullptr) {
+    return failWith(
+        _lastError,
+        FtpsError::NetworkNotInitialized,
+        error,
+        errorSize,
+        "Call begin() before reconnect().");
+  }
+
+  // Snapshot the active configuration on the stack BEFORE closeAll/connect
+  // touch _activeConfig and the _active* buffers (connect() memsets them).
+  char snapHost[kMaxHostLen];
+  char snapUser[kMaxUserLen];
+  char snapPass[kMaxPasswordLen];
+  char snapTls[kMaxTlsServerNameLen];
+  char snapFp[sizeof(_normalizedFingerprint)];
+  copyStringToBuffer(_activeHost, snapHost, sizeof(snapHost));
+  copyStringToBuffer(_activeUser, snapUser, sizeof(snapUser));
+  copyStringToBuffer(_activePassword, snapPass, sizeof(snapPass));
+  copyStringToBuffer(_activeTlsServerName, snapTls, sizeof(snapTls));
+  copyStringToBuffer(_normalizedFingerprint, snapFp, sizeof(snapFp));
+
+  uint16_t snapPort = _activeConfig.port;
+  FtpsTrustMode snapTrust = _activeConfig.trustMode;
+  bool snapValidate = _activeConfig.validateServerCert;
+
+  if (snapTrust == FtpsTrustMode::ImportedCert) {
+    return failWith(
+        _lastError,
+        FtpsError::ConnectionFailed,
+        error,
+        errorSize,
+        "reconnect() does not yet support ImportedCert trust mode.");
+  }
+
+  if (snapHost[0] == '\0') {
+    return failWith(
+        _lastError,
+        FtpsError::ConnectionFailed,
+        error,
+        errorSize,
+        "reconnect() called with no cached host. Call connect() first.");
+  }
+
+  // Force-close all sockets without QUIT — the control channel may already
+  // be in a zombie state, so trying to send QUIT could block.
+  tracePhase("reconnect:close-all");
+  _transport->closeAll();
+  _connected = false;
+
+  FtpsServerConfig fresh = {};
+  fresh.host = snapHost;
+  fresh.port = snapPort;
+  fresh.user = snapUser;
+  fresh.password = snapPass;
+  fresh.tlsServerName = (snapTls[0] != '\0') ? snapTls : nullptr;
+  fresh.trustMode = snapTrust;
+  fresh.fingerprint = (snapFp[0] != '\0') ? snapFp : nullptr;
+  fresh.rootCaPem = nullptr;
+  fresh.validateServerCert = snapValidate;
+
+  tracePhase("reconnect:connect");
+  bool ok = connect(fresh, error, errorSize);
+  tracePhase(ok ? "reconnect:done" : "reconnect:fail");
+  return ok;
 }
 
 FtpsError FtpsClient::lastError() const {

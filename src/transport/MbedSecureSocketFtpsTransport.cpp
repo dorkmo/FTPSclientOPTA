@@ -25,46 +25,71 @@ static const int FTPS_SOCKET_TIMEOUT_MS = 15000;
 
 // Tear down a TLS+TCP socket pair promptly without blocking the caller.
 //
-// History of approaches (each discarded for the reason noted):
+// History (each approach failed for the reason noted):
 //
-//   1. TLSSocketWrapper::close() then delete — closes synchronously; can
-//      block 60+ seconds on some FTPS servers because the underlying
-//      TCPSocket::close() does not honor set_timeout()/set_blocking()
-//      during the close_notify + TCP FIN exchange.
-//   2. Offload delete to a detached CMSIS thread — RTOS thread creation
-//      serializes on a mutex held by the previously stuck cleanup thread,
-//      re-blocking the caller.
-//   3. Pure abandon (leak sockets) — returns promptly but leaks an Mbed
-//      socket handle per transfer; exhausts the socket table after ~1-2
-//      files, breaking subsequent PASV connections.
+//   1. TLSSocketWrapper::close() then delete — Mbed's close path ignores
+//      set_timeout()/set_blocking(false); on some FTPS servers it blocks
+//      60+ seconds waiting for the peer's FIN, tripping the watchdog.
+//   2. Detached CMSIS cleanup thread — thread creation serialized on a
+//      mutex held by the previously stuck cleanup thread, re-blocking
+//      the caller.
+//   3. Pure abandon (leak everything) — returns promptly but leaks one
+//      LWIP netconn slot per transfer, limiting the session to exactly
+//      one file before MEMP_NUM_NETCONN exhaustion.
 //
-// Current approach (4):
-//   a) Flip the underlying TCPSocket to non-blocking mode so send() and
-//      close() cannot block.
-//   b) Call mbedtls_ssl_close_notify() directly on the ssl context. This
-//      delivers the TLS alert to the server (so the server can emit its
-//      final "226 Transfer complete" reply promptly) without invoking
-//      the blocking Mbed close path.
-//   c) delete both objects. TLSSocketWrapper was constructed with
-//      TRANSPORT_KEEP so its destructor does NOT close the TCP socket;
-//      its mbedtls_ssl_close_notify() re-entry is a no-op because the
-//      SSL state machine already recorded the CLOSE_ALERT_SENT state.
-//      The TCPSocket destructor then closes the underlying LWIP handle
-//      in non-blocking mode, freeing the socket slot.
+// Current approach (4) — SO_LINGER=0 abortive close:
 //
-// If a future Mbed OS upgrade reintroduces a blocking path here, the
-// symptom will be a hang inside this helper; fall back to approach (3)
-// by returning before the deletes.
+//   a) Set NSAPI_LINGER = {onoff=1, linger=0} on the underlying TCP
+//      socket. In BSD/LWIP semantics this converts close() into an
+//      immediate TCP RST (reset) instead of a graceful FIN/ACK
+//      handshake, so close() does not wait for the peer.
+//   b) Flip the socket to non-blocking with zero timeout as a safety
+//      net in case NSAPI_LINGER is silently unsupported on this core.
+//   c) Send mbedtls_ssl_close_notify() directly on the ssl context so
+//      the FTPS server emits its final '226 Transfer complete' reply
+//      promptly (without us routing through the blocking wrapper).
+//   d) delete both heap objects. With the socket configured for
+//      abortive close, TLSSocketWrapper's destructor and TCPSocket's
+//      destructor should return quickly, releasing both the ~4 KB of
+//      heap and the LWIP netconn slot.
+//
+// If this still blocks on a given Mbed/firmware combination, we fall
+// back to abandon (approach 3) behind the FTPS_ABANDON_ON_CLOSE macro
+// so at least the watchdog is not tripped.
+//
+// 2026-04-17 update: the historical "delete tls hangs" finding was
+// triggered during boot-time FTP restore in setup(), before loop()
+// or the watchdog were running. That code path has been removed
+// (applyCachedControlSession is no longer called from upgradeDataToTls).
+// At runtime, with the watchdog active and only 1-2 file transfers in
+// flight, full cleanup (delete tls + delete tcp) is required because
+// any leak exhausts the LWIP socket pool after just 1-2 reconnect
+// cycles (verified with -3005 NO_SOCKET on file 2 data-open).
+// We now default to FTPS_ABANDON_ON_CLOSE=0 (full cleanup). If this
+// hangs, the 30s watchdog will recover and we revert.
+#ifndef FTPS_ABANDON_ON_CLOSE
+#define FTPS_ABANDON_ON_CLOSE 0
+#endif
+
 void ftpsReleaseSocketPair(TLSSocketWrapper *&tls, TCPSocket *&tcp) {
-	// Step (a): ensure the TCP layer is non-blocking before any close
-	// path touches it.
+	// (a) Request abortive close (TCP RST instead of FIN/ACK handshake).
 	if (tcp != nullptr) {
+		struct nsapi_linger_t { int l_onoff; int l_linger; } linger = { 1, 0 };
+		nsapi_error_t lingerResult = tcp->setsockopt(NSAPI_SOCKET, NSAPI_LINGER, &linger, sizeof(linger));
+		if (lingerResult != NSAPI_ERROR_OK) {
+			char buf[64];
+			snprintf(buf, sizeof(buf), "xport:linger-unsupported:%d", (int)lingerResult);
+			ftpsTransportTrace(buf);
+		} else {
+			ftpsTransportTrace("xport:linger-set");
+		}
+		// (b) Safety net: non-blocking + zero timeout.
 		tcp->set_blocking(false);
 		tcp->set_timeout(0);
 	}
 
-	// Step (b): best-effort TLS close_notify so the peer can complete its
-	// transfer accounting and send the final reply.
+	// (c) Best-effort TLS close_notify so the peer recognises clean
+	// shutdown and emits any pending reply promptly.
 	if (tls != nullptr) {
 		mbedtls_ssl_context *ssl = tls->get_ssl_context();
 		if (ssl != nullptr) {
@@ -72,31 +97,67 @@ void ftpsReleaseSocketPair(TLSSocketWrapper *&tls, TCPSocket *&tcp) {
 		}
 	}
 
-	// Step (c): release the objects. We have tried three approaches:
+#if FTPS_ABANDON_ON_CLOSE
+	// Hybrid abandon path. Three lessons from prior incidents shape this:
 	//
-	//   - `delete tls; delete tcp;` — hangs the device; TLSSocketWrapper's
-	//     destructor invokes close() internally which blocks on the
-	//     mbedtls close path even with non-blocking TCP.
-	//   - `tcp->close();` alone — also hangs; the LWIP close path blocks
-	//     when the TCP socket is referenced by a still-live
-	//     TLSSocketWrapper (which holds BIO callbacks into the TCP socket).
-	//   - Pure abandon (nulls pointers, frees nothing) — works, but each
-	//     aborted session leaks one LWIP socket handle.
+	//   1. `delete tls` on mbed_opta 4.5.0 reliably hangs the device,
+	//      sometimes silently, sometimes via watchdog reset. The TLS
+	//      wrapper destructor re-enters LWIP callbacks during shutdown
+	//      and is the smoking gun even with TRANSPORT_KEEP. We must
+	//      leak the TLSSocketWrapper.
 	//
-	// The pure-abandon approach allows exactly ONE FTPS transfer per
-	// control session before exhausting the server's willingness to
-	// accept a new PASV data connection. A proper fix requires either
-	// (a) reusing a single pre-allocated TCPSocket across PASV cycles
-	// (re-opening it on the stack) so no leak occurs, or (b) preemptively
-	// reconnecting the control channel per file so the server resets its
-	// state. Both are follow-up work. For now we take the safe path:
-	// abandon the objects and let the caller (FtpsClient) observe the
-	// "FTPS session dropped" on the second file and report success for
-	// the first.
+	//   2. Pure abandon (`tls = nullptr; tcp = nullptr;`) leaks the
+	//      LWIP socket. After ~2 connect cycles the LWIP socket pool
+	//      (~8 entries) is exhausted and every subsequent connect
+	//      silently fails. Observed in per-file reconnect tests.
+	//
+	//   3. `tcp->close()` alone (without delete) is NOT sufficient —
+	//      the C++ TCPSocket retains an LWIP file descriptor reservation
+	//      that only the destructor releases. After ~2 cycles the FD
+	//      table fills and connect() fails again. Observed live with
+	//      proc=2 failed=1 third-file failure at tcp-connecting.
+	//
+	// Therefore: explicitly close() AND delete the TCPSocket (its
+	// destructor is benign on this platform), but still leak the
+	// TLSSocketWrapper to dodge the dangerous mbedtls cleanup. Each
+	// abandoned cycle costs ~10 KB of permanent heap, but releases the
+	// LWIP socket and FD so subsequent reconnects work.
+	if (tcp != nullptr) {
+		(void)tcp->close();
+		delete tcp;
+	}
 	(void)tls;
-	(void)tcp;
 	tls = nullptr;
 	tcp = nullptr;
+#else
+	// (d) Full cleanup path. New ordering as of 2026-04-17:
+	//   - Close the TCP socket FIRST (with linger=0 + non-blocking
+	//     already set above). Any subsequent BIO callbacks from the
+	//     TLS destructor will fail immediately rather than block.
+	//   - Then delete tls. Its destructor may try to send close_notify
+	//     or do other shutdown via the BIO; with TCP already closed
+	//     these calls return errors fast.
+	//   - Then delete tcp to release the LWIP socket back to the pool.
+	// Fine-grained traces so we can see exactly which step (if any)
+	// hangs the watchdog.
+	if (tcp != nullptr) {
+		ftpsTransportTrace("xport:cleanup:tcp-close");
+		(void)tcp->close();
+		ftpsTransportTrace("xport:cleanup:tcp-closed");
+	}
+	if (tls != nullptr) {
+		ftpsTransportTrace("xport:cleanup:tls-delete");
+		delete tls;
+		tls = nullptr;
+		ftpsTransportTrace("xport:cleanup:tls-deleted");
+	}
+	if (tcp != nullptr) {
+		ftpsTransportTrace("xport:cleanup:tcp-delete");
+		delete tcp;
+		tcp = nullptr;
+		ftpsTransportTrace("xport:cleanup:tcp-deleted");
+	}
+#endif
 }
 
 bool failWith(char *error, size_t errorSize, const char *message) {
@@ -232,19 +293,31 @@ bool MbedSecureSocketFtpsTransport::connectSocket(TCPSocket *&socket,
 		socket->close();
 	}
 
-	if (socket->open(_network) != NSAPI_ERROR_OK) {
+	nsapi_error_t openResult = socket->open(_network);
+	if (openResult != NSAPI_ERROR_OK) {
+		char buf[64];
+		snprintf(buf, sizeof(buf), "xport:open-failed:%d", (int)openResult);
+		ftpsTransportTrace(buf);
 		delete socket;
 		socket = nullptr;
-		return failWith(error, errorSize, "Failed to open TCPSocket.");
+		char emsg[80];
+		snprintf(emsg, sizeof(emsg), "Failed to open TCPSocket (nsapi=%d).", (int)openResult);
+		return failWith(error, errorSize, emsg);
 	}
 
 	socket->set_timeout(FTPS_SOCKET_TIMEOUT_MS);
 
-	if (socket->connect(address) != NSAPI_ERROR_OK) {
+	nsapi_error_t connResult = socket->connect(address);
+	if (connResult != NSAPI_ERROR_OK) {
+		char buf[64];
+		snprintf(buf, sizeof(buf), "xport:connect-failed:%d", (int)connResult);
+		ftpsTransportTrace(buf);
 		socket->close();
 		delete socket;
 		socket = nullptr;
-		return failWith(error, errorSize, "TCP connect failed.");
+		char emsg[80];
+		snprintf(emsg, sizeof(emsg), "TCP connect failed (nsapi=%d).", (int)connResult);
+		return failWith(error, errorSize, emsg);
 	}
 
 	return true;
@@ -370,21 +443,23 @@ bool MbedSecureSocketFtpsTransport::upgradeControlToTls(const FtpTlsConfig &tls,
 
 	_lastTlsError = _controlTls->connect();
 	if (_lastTlsError != NSAPI_ERROR_OK) {
-		delete _controlTls;
-		_controlTls = nullptr;
+		// Use the non-blocking release helper — direct delete would
+		// re-enter Mbed's blocking close path on some cores.
+		ftpsReleaseSocketPair(_controlTls, _controlSocket);
+		_controlConnected = false;
 		return failWith(error, errorSize, "TLS handshake on the control channel failed.");
 	}
 
 	cacheControlSession();
 
 	if (!completePinnedFingerprintCheck(*_controlTls, tls.pinnedFingerprint,
-																			error, errorSize)) {
-		_controlTls->close();
-		delete _controlTls;
-		_controlTls = nullptr;
-		if (_controlSocket != nullptr) {
-			_controlSocket->close();
-		}
+																				error, errorSize)) {
+		// Fingerprint mismatch: release the socket pair and report failure
+		// to the caller. Previously this path fell through to `return true`,
+		// which silently handed an already-torn-down transport back to the
+		// FTPS client — the next ctrlWrite() then failed with a confusing
+		// "Failed to write FTP command" error at PBSZ.
+		ftpsReleaseSocketPair(_controlTls, _controlSocket);
 		_controlConnected = false;
 		return false;
 	}
@@ -516,6 +591,13 @@ bool MbedSecureSocketFtpsTransport::upgradeDataToTls(const FtpTlsConfig &tls,
 		closeData();
 		return false;
 	}
+
+	// NOTE: applyCachedControlSession() was previously called here per
+	// GPT-5.4 finding #4 (TLS session resumption on data channel). It is
+	// disabled because it reliably hangs setup() during boot-time FTP
+	// restore on Opta + mbed_opta 4.5.0, before loop()/watchdog can start.
+	// The per-store reconnect path (FtpsClient::reconnect()) is sufficient
+	// to unstick the multi-file backup without touching this code path.
 
 	ftpsTransportTrace("xport:data:tls-handshake-start");
 	_lastTlsError = _dataTls->connect();

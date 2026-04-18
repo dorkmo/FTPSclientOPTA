@@ -234,6 +234,43 @@ Remaining work:
 - Servers that enforce strict TLS session reuse may require additional transport work
 - DHCP may hang on some Opta/network configurations; static IP is recommended
 
+### Arduino Opta networking constraints (mbed_opta 4.5.0)
+
+The FTPS library itself is platform-neutral, but Arduino Opta integrators
+should be aware of two hard limits in the LWIP build shipped inside the
+precompiled `libmbed.a` archive:
+
+- **Socket pool size is fixed at 4.** `MBED_CONF_LWIP_SOCKET_MAX` and
+  `MBED_CONF_LWIP_TCP_SOCKET_MAX` are baked into the precompiled archive,
+  so editing `variants/OPTA/mbed_config.h` has no effect at link time.
+  An Opta application can have at most ~4 simultaneous TCP PCBs across
+  the entire device.
+- **`SO_LINGER` is not implemented.** `setsockopt(SO_LINGER, {l_onoff=1,
+  l_linger=0})` returns `NSAPI_ERROR_UNSUPPORTED` (`-3002`). Every closed
+  TCP socket therefore sits in `TIME_WAIT` for ~60 s instead of being
+  hard-reset. The transport now traces `xport:linger-unsupported:-3002`
+  so this is visible at runtime.
+
+For a single FTPS transfer (control + data) these limits are not visible.
+For multi-file backup workflows on Opta, the practical consequences are:
+
+- An idle `EthernetServer` consumes 1 of the 4 PCB slots for the LISTEN
+  socket. If the application also keeps an accepted browser session
+  active, only 2 slots remain for FTPS — not enough for a control
+  channel plus a fresh PASV data channel while the previous data
+  socket is still in `TIME_WAIT`.
+- Pacing matters. Opening a new PASV data socket within ~60 s of
+  closing the previous one will fail with `NSAPI_ERROR_NO_SOCKET`
+  (`-3005`). The transport surfaces this via
+  `xport:open-failed:-3005` so integrators can distinguish pool
+  exhaustion from network errors.
+
+A recipe for working around both constraints in an application that also
+hosts a web UI is documented in
+[CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md](CODE%20REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md).
+Follow-up ideas for raising the per-file throughput ceiling are tracked
+in [CODE REVIEW/MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md](CODE%20REVIEW/MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md).
+
 ## Project Documentation
 
 - [Implementation note](CODE%20REVIEW/FTPS_IMPLEMENTATION_04132026.md)
