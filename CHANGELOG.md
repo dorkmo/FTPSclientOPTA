@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Decoupled FTPS release automation from TankAlarm project sources so
+  FTPS releases are packaged and published independently.
+
 ## [0.2.1] - 2026-04-18
 
 ### Changed

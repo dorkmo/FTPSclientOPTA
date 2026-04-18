@@ -291,9 +291,9 @@ For multi-file backup workflows on Opta, the practical consequences are:
 
 A recipe for working around both constraints in an application that also
 hosts a web UI is documented in the integrating Tank Alarm Server
-project (see
-`ArduinoSMSTankAlarm/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`
-and `MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md`).
+project (see FTPS repository docs:
+`CODE REVIEW/FTPS_RETRY_PROPOSALS_SUMMARY_04172026.md`
+and `CODE REVIEW/SOCKET_CLOSE_HANG_ANALYSIS_04172026.md`).
 
 ## Project Documentation
 
