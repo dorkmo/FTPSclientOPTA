@@ -1,12 +1,12 @@
 # FTPS File Transfer Retry Review (GPT-5.4)
 
 **Date:** 2026-04-17  
-**Repositories reviewed:** `ArduinoSMSTankAlarm`, `ArduinoOPTA-FTPS`  
+**Repositories reviewed:** `ExternalAppRepo`, `ArduinoOPTA-FTPS`  
 **Focus:** Review the existing FTPS retry proposals and recommend safer retry behavior for multi-file backup/restore flows on Arduino Opta.
 
 ## Bottom line
 
-The current Tank Alarm per-file retry proposal is worth doing, but it should be tightened before implementation.
+The current External App per-file retry proposal is worth doing, but it should be tightened before implementation.
 
 The main improvement is this: do **not** treat every `FtpsError::DataConnectionFailed` as "retryable socket pool exhaustion." In the current FTPS library, that error is still too broad. The application should retry only when the failure is specifically the Opta/LWIP `-3005` no-socket condition, and it should apply the same retry/pacing wrapper to **all** FTPS uploads in the batch, including `clients_manifest.txt` and per-client snapshot files.
 
@@ -14,10 +14,10 @@ The second important change is to stop using the post-`STOR` `NOOP` probe as par
 
 ## Reviewed inputs
 
-- `ArduinoSMSTankAlarm/CODE REVIEW/PER_FILE_RETRY_PLAN_04172026.md`
-- `ArduinoSMSTankAlarm/CODE REVIEW/MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md`
-- `ArduinoSMSTankAlarm/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`
-- `ArduinoSMSTankAlarm/TankAlarm-112025-Server-BluesOpta/TankAlarm-112025-Server-BluesOpta.ino`
+- `ExternalAppRepo/CODE REVIEW/PER_FILE_RETRY_PLAN_04172026.md`
+- `ExternalAppRepo/CODE REVIEW/MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md`
+- `ExternalAppRepo/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`
+- `ExternalAppRepo/ExternalServerSketch/ExternalServerSketch.ino`
 - `ArduinoOPTA-FTPS/src/FtpsClient.cpp`
 - `ArduinoOPTA-FTPS/src/FtpsClient.h`
 - `ArduinoOPTA-FTPS/src/FtpsErrors.h`
@@ -145,7 +145,7 @@ That works for a first application-side patch, but it is brittle.
 - `const char *lastTransportPhase() const`
 - `FtpsRetryHint lastRetryHint() const`
 
-The minimal useful addition is `lastNsapiError()`. That would let Tank Alarm distinguish `-3005` from every other `DataConnectionFailed` case without parsing strings.
+The minimal useful addition is `lastNsapiError()`. That would let External App distinguish `-3005` from every other `DataConnectionFailed` case without parsing strings.
 
 ## Recommended v1 retry policy
 
@@ -160,7 +160,7 @@ Use a deliberately conservative policy first.
 
 ## Suggested implementation shape
 
-### Application side (`ArduinoSMSTankAlarm`)
+### Application side (`ExternalAppRepo`)
 
 Add a reusable helper around FTPS uploads rather than inlining retry logic in one loop only.
 

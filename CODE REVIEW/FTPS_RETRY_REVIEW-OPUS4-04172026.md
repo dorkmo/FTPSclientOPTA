@@ -1,18 +1,18 @@
 # FTPS File Transfer Retry — Review & Recommendations (Opus 4.6)
 
 **Date:** 2026-04-17  
-**Scope:** Cross-repository review of FTPS retry proposals for ArduinoOPTA-FTPS and ArduinoSMSTankAlarm.  
+**Scope:** Cross-repository review of FTPS retry proposals for ArduinoOPTA-FTPS and ExternalAppRepo.  
 **Documents reviewed:**
 - `ArduinoOPTA-FTPS/CODE REVIEW/FTPS_RETRY_PROPOSALS_SUMMARY_04172026.md`
 - `ArduinoOPTA-FTPS/CODE REVIEW/SOCKET_CLOSE_HANG_ANALYSIS_04172026.md`
 - `ArduinoOPTA-FTPS/CODE REVIEW/SOCKET_CLOSE_HANG_REVIEW-GPT54-04172026.MD`
 - `ArduinoOPTA-FTPS/CODE REVIEW/SOCKET_CLOSE_HANG_REVIEW-CODEX35-04172026.MD`
 - `ArduinoOPTA-FTPS/CODE REVIEW/SOCKET_CLOSE_HANG_REVIEW-GEMINI31-04172026.MD`
-- `ArduinoSMSTankAlarm/CODE REVIEW/PER_FILE_RETRY_PLAN_04172026.md`
-- `ArduinoSMSTankAlarm/CODE REVIEW/MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md`
-- `ArduinoSMSTankAlarm/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`
-- `ArduinoSMSTankAlarm/CODE REVIEW/NIGHTLY_BACKUP_PLAN_04172026.md`
-- Current source: `FtpsClient.cpp`, `MbedSecureSocketFtpsTransport.cpp`, `TankAlarm-112025-Server-BluesOpta.ino`
+- `ExternalAppRepo/CODE REVIEW/PER_FILE_RETRY_PLAN_04172026.md`
+- `ExternalAppRepo/CODE REVIEW/MULTI_FILE_BACKUP_FOLLOWUPS_04172026.md`
+- `ExternalAppRepo/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`
+- `ExternalAppRepo/CODE REVIEW/NIGHTLY_BACKUP_PLAN_04172026.md`
+- Current source: `FtpsClient.cpp`, `MbedSecureSocketFtpsTransport.cpp`, `ExternalServerSketch.ino`
 
 ---
 
@@ -126,7 +126,7 @@ All reviewers agree that reconnect-per-file under the old abandon-only close pat
 
 ### 2.1 Remove the Post-STOR `isControlAlive()` Probe
 
-**File:** `TankAlarm-112025-Server-BluesOpta.ino`, `ftpsStoreBuffer()` (~line 5690)
+**File:** `ExternalServerSketch.ino`, `ftpsStoreBuffer()` (~line 5690)
 
 The current code calls `gFtpsClient.isControlAlive()` after every successful STOR. This sends a NOOP command to the server. Problems:
 

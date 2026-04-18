@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- Decoupled FTPS release automation from TankAlarm project sources so
+- Decoupled FTPS release automation from external application project sources so
   FTPS releases are packaged and published independently.
 
 ## [0.2.1] - 2026-04-18
@@ -108,8 +108,8 @@ integration-side observation surfaced during this work:
 The matching application-side workarounds (release the listening server
 socket during backup, wait for `TIME_WAIT` to drain between files) are
 integrator concerns, not library concerns, and are described in the
-integrating Tank Alarm Server project documentation
-(`ArduinoSMSTankAlarm/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`).
+integrating External App Server project documentation
+(`ExternalAppRepo/CODE REVIEW/OPTA_LWIP_BACKUP_RECIPE_04172026.md`).
 
 The earlier "first file succeeds, subsequent files fail with
 `ConnectionFailed`" limitation is **resolved** at the library level. The

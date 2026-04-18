@@ -344,7 +344,7 @@ Use `examples/PyftpdlibLiveTest`:
 
 ### 7.3 Primary test harness used during this investigation
 
-The `ArduinoSMSTankAlarm/TankAlarm-112025-Server-BluesOpta` sketch
+The `ExternalAppRepo/ExternalServerSketch` sketch
 orchestrates an HTTP `POST /api/ftp-backup` that walks several
 config files. That is where the `filesUploaded: 1, filesFailed: N`
 output originated. The library itself is reproducer-independent.

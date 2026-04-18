@@ -15,7 +15,7 @@ I scanned the close-path and adjacent FTPS control/data lifecycle across:
 - `ArduinoOPTA-FTPS/src/FtpsClient.cpp`
 - `ArduinoOPTA-FTPS/src/FtpsClient.h`
 - `ArduinoOPTA-FTPS/src/FtpsErrors.h`
-- `ArduinoSMSTankAlarm/TankAlarm-112025-Server-BluesOpta/TankAlarm-112025-Server-BluesOpta.ino`
+- `ExternalAppRepo/ExternalServerSketch/ExternalServerSketch.ino`
 - `ArduinoOPTA-FTPS/CHANGELOG.md`
 - `ArduinoOPTA-FTPS/README.md`
 
@@ -75,7 +75,7 @@ The top two items are sufficient to explain the "one file uploads, second file f
   - `FtpsClient.cpp:457`
   - `FtpsClient.cpp:458`
 - Integration helper calls `begin()` on each FTPS connect flow:
-  - `TankAlarm-112025-Server-BluesOpta.ino:5606`
+  - `ExternalServerSketch.ino:5606`
 
 **Why this is a defect**
 - Recreating `FtpsClient` transport does not recover previously leaked sockets.
@@ -149,7 +149,7 @@ The top two items are sufficient to explain the "one file uploads, second file f
 
 **Evidence**
 - Post-store control probe:
-  - `gFtpsClient.isControlAlive(...)` at `TankAlarm-112025-Server-BluesOpta.ino:5661`
+  - `gFtpsClient.isControlAlive(...)` at `ExternalServerSketch.ino:5661`
 - `ftpsStoreBuffer()` returns success even when probe fails.
 
 **Why this is a defect/risk**
@@ -167,10 +167,10 @@ The top two items are sufficient to explain the "one file uploads, second file f
 
 **Evidence**
 - Diagnostic switch default off:
-  - `TankAlarm-112025-Server-BluesOpta.ino:219`
+  - `ExternalServerSketch.ino:219`
 - Reconnect-per-file logic:
-  - `TankAlarm-112025-Server-BluesOpta.ino:6225`
-  - `TankAlarm-112025-Server-BluesOpta.ino:6273`
+  - `ExternalServerSketch.ino:6225`
+  - `ExternalServerSketch.ino:6273`
 
 **Why this is a defect/risk**
 - It can improve server-side state handling, but does not eliminate local socket leak behavior.

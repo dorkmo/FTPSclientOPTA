@@ -290,7 +290,7 @@ For multi-file backup workflows on Opta, the practical consequences are:
   exhaustion from network errors.
 
 A recipe for working around both constraints in an application that also
-hosts a web UI is documented in the integrating Tank Alarm Server
+hosts a web UI is documented in the integrating External App Server
 project (see FTPS repository docs:
 `CODE REVIEW/FTPS_RETRY_PROPOSALS_SUMMARY_04172026.md`
 and `CODE REVIEW/SOCKET_CLOSE_HANG_ANALYSIS_04172026.md`).

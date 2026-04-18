@@ -1,7 +1,7 @@
 # FTPS File Transfer Retry Proposals & Improvements
 
 **Date:** April 17, 2026
-**Repositories Reviewed:** Tank Alarm (`ArduinoSMSTankAlarm`), ArduinoOPTA-FTPS
+**Repositories Reviewed:** External App (`ExternalAppRepo`), ArduinoOPTA-FTPS
 
 This document synthesizes findings and proposes improvements for handling FTPS file transfer failures, specifically addressing the hardware watchdog resets and socket pool exhaustion issues observed on the Arduino Opta platform.
 
