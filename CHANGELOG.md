@@ -8,6 +8,26 @@ All notable changes to this project will be documented in this file.
 - Removed `PortentaEthernet` from `library.properties` `depends` to satisfy
   Arduino Lint Library Manager index validation (`LP048`).
 
+## [0.3.0] - 2026-06-29
+
+### Added
+- New public API `FtpsClient::discoverFingerprint(host, port, tlsServerName,
+  fingerprintOut, fingerprintOutSize, error, errorSize)`. Runs a one-shot
+  TCP + banner + `AUTH TLS` + control-channel TLS handshake with cert
+  validation deliberately disabled, captures the peer certificate's
+  SHA-256 fingerprint via the existing transport
+  `getPeerCertFingerprint()`, then closes. The returned 64-char uppercase
+  hex string is intended to be presented to the operator for out-of-band
+  verification and then pasted into the `fingerprint` field of a
+  subsequent verified `FtpsServerConfig`.
+
+  Trace phases emitted: `discover:tcp-open`, `discover:banner`,
+  `discover:auth-tls`, `discover:tls-handshake`,
+  `discover:extract-fingerprint`, `discover:done`.
+
+  Powers the "Discover SHA-256 Fingerprint" button on the FTP settings
+  page in SenaxTankAlarm server v2.0.70+.
+
 ## [0.2.3] - 2026-04-18
 
 ### Added

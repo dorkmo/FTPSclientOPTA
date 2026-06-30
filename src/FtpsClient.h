@@ -85,6 +85,25 @@ public:
   /// Send QUIT and close all sockets.
   void quit();
 
+  /// Probe an FTPS server just far enough (TCP + banner + AUTH TLS +
+  /// control-channel TLS handshake) to capture the peer certificate's
+  /// SHA-256 fingerprint, then close the connection. Cert validation is
+  /// intentionally skipped so this works before the operator has trusted
+  /// anything. Use the returned 64-hex-char string to populate the
+  /// `fingerprint` field of a subsequent verified FtpsServerConfig.
+  ///
+  /// Requires begin() to have been called first. `tlsServerName` is
+  /// optional — if null/empty, falls back to `host`. On success, writes
+  /// a NUL-terminated uppercase hex string to `fingerprintOut` (no
+  /// colons); `fingerprintOutSize` must be at least 65.
+  bool discoverFingerprint(const char *host,
+                           uint16_t port,
+                           const char *tlsServerName,
+                           char *fingerprintOut,
+                           size_t fingerprintOutSize,
+                           char *error,
+                           size_t errorSize);
+
   /// Force-close all sockets (no QUIT) and re-run the connect/login/AUTH TLS
   /// flow using the cached configuration. Use this between large transfers
   /// to work around Mbed-OS socket teardown issues that can leave the control

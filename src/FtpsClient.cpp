@@ -1804,6 +1804,124 @@ void FtpsClient::quit() {
   _connected = false;
 }
 
+bool FtpsClient::discoverFingerprint(const char *host,
+                                     uint16_t port,
+                                     const char *tlsServerName,
+                                     char *fingerprintOut,
+                                     size_t fingerprintOutSize,
+                                     char *error,
+                                     size_t errorSize) {
+  clearError(error, errorSize);
+  if (fingerprintOut != nullptr && fingerprintOutSize > 0) {
+    fingerprintOut[0] = '\0';
+  }
+
+  if (_transport == nullptr) {
+    return failWith(
+        _lastError,
+        FtpsError::NetworkNotInitialized,
+        error,
+        errorSize,
+        "FTPS transport not initialized. Call begin() first.");
+  }
+  if (!hasValue(host) || port == 0) {
+    return failWith(
+        _lastError,
+        FtpsError::ConnectionFailed,
+        error,
+        errorSize,
+        "host and port are required for discovery.");
+  }
+  if (fingerprintOut == nullptr || fingerprintOutSize < 65) {
+    return failWith(
+        _lastError,
+        FtpsError::CertValidationFailed,
+        error,
+        errorSize,
+        "fingerprint output buffer too small (need >= 65 bytes).");
+  }
+
+  // Make sure no stale connection is lingering.
+  _transport->closeAll();
+  _connected = false;
+
+  FtpEndpoint endpoint;
+  endpoint.host = host;
+  endpoint.port = port;
+
+  FtpTlsConfig tls;
+  tls.securityMode = FtpTlsSecurityMode::ExplicitTls;
+  tls.serverName = hasValue(tlsServerName) ? tlsServerName : host;
+  tls.pinnedFingerprint = nullptr;       // we are discovering it
+  tls.rootCaPem = nullptr;
+  tls.validateServerCert = false;        // accept any cert so we can read it
+
+  tracePhase("discover:tcp-open");
+  if (!_transport->connectControl(endpoint, tls, error, errorSize)) {
+    return failWith(
+        _lastError,
+        FtpsError::ConnectionFailed,
+        error,
+        errorSize,
+        hasValue(error) ? error : "TCP control connection failed.");
+  }
+
+  char reply[FTPS_REPLY_BUFFER_SIZE] = {};
+  tracePhase("discover:banner");
+  int code = ftpReadResponse(*_transport, reply, sizeof(reply));
+  if (code != 220) {
+    _transport->closeAll();
+    return failWith(
+        _lastError,
+        FtpsError::BannerReadFailed,
+        error,
+        errorSize,
+        hasValue(reply) ? reply : "Failed to read FTP banner.");
+  }
+
+  tracePhase("discover:auth-tls");
+  code = ftpSendCommand(*_transport, "AUTH TLS", reply, sizeof(reply));
+  if (code != 234) {
+    code = ftpSendCommand(*_transport, "AUTH SSL", reply, sizeof(reply));
+    if (code != 234) {
+      _transport->closeAll();
+      return failWith(
+          _lastError,
+          FtpsError::AuthTlsRejected,
+          error,
+          errorSize,
+          hasValue(reply) ? reply : "AUTH TLS was rejected by the server.");
+    }
+  }
+
+  tracePhase("discover:tls-handshake");
+  if (!_transport->upgradeControlToTls(tls, error, errorSize)) {
+    _transport->closeAll();
+    return failWith(
+        _lastError,
+        FtpsError::ControlTlsHandshakeFailed,
+        error,
+        errorSize,
+        hasValue(error) ? error : "Control-channel TLS handshake failed.");
+  }
+
+  tracePhase("discover:extract-fingerprint");
+  if (!_transport->getPeerCertFingerprint(fingerprintOut, fingerprintOutSize)) {
+    _transport->closeAll();
+    return failWith(
+        _lastError,
+        FtpsError::CertValidationFailed,
+        error,
+        errorSize,
+        "Could not extract peer certificate fingerprint.");
+  }
+
+  tracePhase("discover:done");
+  _transport->closeAll();
+  _lastError = FtpsError::None;
+  return true;
+}
+
 void FtpsClient::setReconnectBetweenStores(bool enabled) {
   _reconnectBetweenStores = enabled;
 }
